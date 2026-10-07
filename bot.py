@@ -1,3 +1,23 @@
+import os
+import logging
+import tempfile
+import re
+import asyncio
+
+from pathlib import Path
+
+import yt_dlp
+
+from telegram import Update
+from telegram.constants import ChatAction
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
 def download_video(url: str, temp_dir: str) -> tuple[Path | None, str | None]:
     """
     Download a single video using yt-dlp.
