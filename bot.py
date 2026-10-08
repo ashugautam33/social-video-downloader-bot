@@ -323,14 +323,12 @@ def convert_to_mp4(
 ) -> tuple[Path | None, str | None]:
 
     output_file = (
-        Path(temp_dir)
-        / "final_video.mp4"
+        Path(temp_dir) / "final_video.mp4"
     )
 
     ffmpeg = find_ffmpeg()
 
     if not ffmpeg:
-
         return (
             None,
             "FFmpeg is not installed."
@@ -338,12 +336,12 @@ def convert_to_mp4(
 
     command = [
         ffmpeg,
-
         "-y",
 
         "-i",
         str(input_file),
 
+        # Video
         "-c:v",
         "libx264",
 
@@ -353,12 +351,14 @@ def convert_to_mp4(
         "-crf",
         "23",
 
+        # Audio
         "-c:a",
         "aac",
 
         "-b:a",
         "128k",
 
+        # Compatibility
         "-pix_fmt",
         "yuv420p",
 
@@ -371,43 +371,71 @@ def convert_to_mp4(
     try:
 
         logger.info(
-            "Converting %s to MP4",
-            input_file.name,
+            "FFmpeg input: %s",
+            input_file
+        )
+
+        logger.info(
+            "FFmpeg input size: %.2f MB",
+            input_file.stat().st_size / 1024 / 1024
         )
 
         result = subprocess.run(
             command,
+
             stdout=subprocess.PIPE,
+
             stderr=subprocess.PIPE,
+
             text=True,
+
             timeout=300,
         )
 
+        # IMPORTANT:
+        # Always print the real FFmpeg error.
         if result.returncode != 0:
 
             logger.error(
-                "FFmpeg error: %s",
-                result.stderr[-4000:],
+                "FFmpeg FAILED."
+            )
+
+            logger.error(
+                "FFmpeg return code: %s",
+                result.returncode,
+            )
+
+            logger.error(
+                "FFmpeg stderr:\n%s",
+                result.stderr[-8000:],
             )
 
             return (
                 None,
-                "FFmpeg could not convert the video."
+                "FFmpeg conversion failed.\n\n"
+                f"FFmpeg error:\n"
+                f"{result.stderr[-5000:]}"
             )
 
         if not output_file.exists():
 
             return (
                 None,
-                "FFmpeg did not create the MP4 file."
+                "FFmpeg completed but "
+                "did not create the MP4."
             )
 
         if output_file.stat().st_size <= 0:
 
             return (
                 None,
-                "The converted video is empty."
+                "FFmpeg created an empty MP4."
             )
+
+        logger.info(
+            "FFmpeg conversion successful: %s",
+            output_file
+        )
 
         return (
             output_file,
@@ -416,22 +444,25 @@ def convert_to_mp4(
 
     except subprocess.TimeoutExpired:
 
+        logger.error(
+            "FFmpeg conversion timed out."
+        )
+
         return (
             None,
-            "Video conversion timed out."
+            "FFmpeg conversion timed out after 5 minutes."
         )
 
     except Exception as error:
 
         logger.exception(
-            "FFmpeg conversion error."
+            "FFmpeg conversion exception."
         )
 
         return (
             None,
             f"{type(error).__name__}: {error}"
         )
-
 
 # ============================================================
 # BASE YT-DLP OPTIONS
