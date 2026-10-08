@@ -8,6 +8,7 @@ import logging
 import tempfile
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import yt_dlp
 from PIL import Image, ImageDraw
@@ -61,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# CREATE LIGHTNING GIF
+# LIGHTNING ANIMATION
 # ============================================================
 
 def create_lightning_gif():
@@ -119,7 +120,6 @@ def create_lightning_gif():
             (20, 45),
             (12, 75),
         ):
-
             draw.line(
                 points + [points[0]],
                 fill=(255, 220, 0, alpha),
@@ -127,13 +127,11 @@ def create_lightning_gif():
                 joint="curve",
             )
 
-        # Lightning
         draw.polygon(
             points,
             fill=(255, 215, 0, 255),
         )
 
-        # Border
         draw.line(
             points + [points[0]],
             fill=(255, 255, 255, 255),
@@ -151,8 +149,6 @@ def create_lightning_gif():
         loop=0,
         disposal=2,
     )
-
-    logger.info("Lightning animation created")
 
 
 # ============================================================
@@ -175,6 +171,41 @@ def extract_url(text):
     return match.group(0).rstrip(
         ".,!?)]}"
     )
+
+
+def clean_instagram_url(url):
+
+    """
+    Remove Instagram tracking/query parameters.
+
+    Example:
+    /reel/ABC/?igsh=xxxx
+    becomes:
+    /reel/ABC/
+    """
+
+    try:
+
+        parts = urlsplit(url)
+
+        return urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                "",
+                "",
+            )
+        )
+
+    except Exception:
+
+        return url
+
+
+def is_instagram(url):
+
+    return "instagram.com" in url.lower()
 
 
 def is_supported_url(url):
@@ -203,18 +234,24 @@ def create_cookie_file():
             "instagram_cookies.txt"
         )
 
-        data = base64.b64decode(
+        cookie_data = base64.b64decode(
             INSTAGRAM_COOKIES_B64
         )
 
-        cookie_file.write_bytes(data)
+        cookie_file.write_bytes(
+            cookie_data
+        )
+
+        logger.info(
+            "Instagram cookie file created."
+        )
 
         return str(cookie_file)
 
     except Exception as e:
 
         logger.error(
-            "Cookie error: %s",
+            "Unable to create Instagram cookies: %s",
             e,
         )
 
@@ -222,7 +259,7 @@ def create_cookie_file():
 
 
 # ============================================================
-# FFMPEG CHECK
+# FFMPEG
 # ============================================================
 
 def check_ffmpeg():
@@ -244,7 +281,7 @@ def check_ffmpeg():
 
 
 # ============================================================
-# FFPROBE
+# MEDIA INFO
 # ============================================================
 
 def get_media_info(file_path):
@@ -281,8 +318,7 @@ def get_media_info(file_path):
 
         video = next(
             (
-                s
-                for s in streams
+                s for s in streams
                 if s.get("codec_type") == "video"
             ),
             None,
@@ -290,8 +326,7 @@ def get_media_info(file_path):
 
         audio = next(
             (
-                s
-                for s in streams
+                s for s in streams
                 if s.get("codec_type") == "audio"
             ),
             None,
@@ -314,7 +349,351 @@ def get_media_info(file_path):
 
 
 # ============================================================
-# CONVERT VIDEO + AUDIO
+# YT-DLP OPTIONS
+# ============================================================
+
+def build_ydl_options(
+    output_template,
+    url,
+    cookie_file=None,
+):
+
+    options = {
+
+        # ====================================================
+        # VIDEO + AUDIO
+        # ====================================================
+
+        "format": (
+            "bv*[height<=720]+ba/"
+            "bv*[height<=1080]+ba/"
+            "bv*+ba/"
+            "b[height<=720]/"
+            "b[height<=1080]/"
+            "b"
+        ),
+
+        "outtmpl": output_template,
+
+        "noplaylist": True,
+
+        "playlist": False,
+
+        "merge_output_format": "mp4",
+
+        "retries": 2,
+
+        "fragment_retries": 2,
+
+        "file_access_retries": 2,
+
+        "socket_timeout": 25,
+
+        "concurrent_fragment_downloads": 4,
+
+        "http_headers": {
+            "User-Agent":
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0.0.0 "
+                "Safari/537.36",
+
+            "Accept":
+                "*/*",
+
+            "Accept-Language":
+                "en-US,en;q=0.9",
+        },
+
+        # Keep Railway logs useful
+        "quiet": False,
+
+        "no_warnings": False,
+    }
+
+    if cookie_file:
+
+        options["cookiefile"] = cookie_file
+
+    return options
+
+
+# ============================================================
+# FIND MEDIA FILE
+# ============================================================
+
+def find_media_file(folder):
+
+    candidates = []
+
+    for file in folder.iterdir():
+
+        if not file.is_file():
+            continue
+
+        if file.suffix.lower() in (
+            ".mp4",
+            ".mkv",
+            ".webm",
+            ".mov",
+            ".m4v",
+        ):
+
+            candidates.append(file)
+
+    if not candidates:
+        return None
+
+    return max(
+        candidates,
+        key=lambda p: p.stat().st_size,
+    )
+
+
+# ============================================================
+# SINGLE YT-DLP ATTEMPT
+# ============================================================
+
+def download_attempt(
+    url,
+    folder,
+    attempt_name,
+):
+
+    output_template = str(
+        folder /
+        "%(id)s.%(ext)s"
+    )
+
+    cookie_file = create_cookie_file()
+
+    options = build_ydl_options(
+        output_template,
+        url,
+        cookie_file,
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    logger.info(
+        "Instagram attempt: %s",
+        attempt_name,
+    )
+
+    logger.info(
+        "URL: %s",
+        url,
+    )
+
+    logger.info(
+        "Cookies: %s",
+        bool(cookie_file),
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    try:
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            info = ydl.extract_info(
+                url,
+                download=True,
+            )
+
+            if not info:
+
+                return None, (
+                    "yt-dlp returned no media information."
+                )
+
+            # Log format details
+            logger.info(
+                "Format: %s",
+                info.get("format"),
+            )
+
+            logger.info(
+                "Format ID: %s",
+                info.get("format_id"),
+            )
+
+            logger.info(
+                "Video codec: %s",
+                info.get("vcodec"),
+            )
+
+            logger.info(
+                "Audio codec: %s",
+                info.get("acodec"),
+            )
+
+            logger.info(
+                "Requested downloads: %s",
+                info.get(
+                    "requested_downloads"
+                ),
+            )
+
+        file = find_media_file(
+            folder
+        )
+
+        if not file:
+
+            return None, (
+                "yt-dlp completed but no "
+                "video file was created."
+            )
+
+        logger.info(
+            "Downloaded file: %s",
+            file,
+        )
+
+        media_info = get_media_info(
+            file
+        )
+
+        if media_info:
+
+            video = media_info.get(
+                "video"
+            )
+
+            audio = media_info.get(
+                "audio"
+            )
+
+            logger.info(
+                "Downloaded video stream: %s",
+                bool(video),
+            )
+
+            logger.info(
+                "Downloaded audio stream: %s",
+                bool(audio),
+            )
+
+            if audio:
+
+                logger.info(
+                    "Audio codec: %s",
+                    audio.get(
+                        "codec_name"
+                    ),
+                )
+
+        return file, None
+
+    except Exception as e:
+
+        error = str(e)
+
+        logger.error(
+            "Download attempt failed: %s",
+            error,
+        )
+
+        return None, error
+
+
+# ============================================================
+# DOWNLOAD WITH INSTAGRAM RETRIES
+# ============================================================
+
+def download_video(url):
+
+    folder = Path(
+        tempfile.mkdtemp(
+            dir=BASE_DIR
+        )
+    )
+
+    # --------------------------------------------------------
+    # ATTEMPT 1
+    # Original URL + cookies
+    # --------------------------------------------------------
+
+    file, error = download_attempt(
+        url,
+        folder,
+        "original URL",
+    )
+
+    if file:
+
+        return file, folder, None
+
+    # --------------------------------------------------------
+    # ATTEMPT 2
+    # Clean Instagram URL
+    # --------------------------------------------------------
+
+    if is_instagram(url):
+
+        clean_url = clean_instagram_url(
+            url
+        )
+
+        if clean_url != url:
+
+            logger.info(
+                "Trying cleaned Instagram URL..."
+            )
+
+            file, error2 = download_attempt(
+                clean_url,
+                folder,
+                "clean Instagram URL",
+            )
+
+            if file:
+
+                return file, folder, None
+
+            error = error2
+
+    # --------------------------------------------------------
+    # ATTEMPT 3
+    # Same URL with trailing slash normalized
+    # --------------------------------------------------------
+
+    if is_instagram(url):
+
+        clean_url = clean_instagram_url(
+            url
+        ).rstrip("/") + "/"
+
+        file, error3 = download_attempt(
+            clean_url,
+            folder,
+            "normalized Instagram URL",
+        )
+
+        if file:
+
+            return file, folder, None
+
+        error = error3
+
+    # --------------------------------------------------------
+    # ALL FAILED
+    # --------------------------------------------------------
+
+    return None, folder, error
+
+
+# ============================================================
+# CONVERT TO IPHONE MP4
 # ============================================================
 
 def convert_video(input_file):
@@ -333,7 +712,7 @@ def convert_video(input_file):
     if not info:
 
         return None, (
-            "Unable to inspect downloaded file."
+            "Unable to inspect downloaded video."
         )
 
     video = info.get("video")
@@ -342,51 +721,22 @@ def convert_video(input_file):
     if not video:
 
         return None, (
-            "Downloaded file has no video stream."
+            "No video stream found."
         )
 
-    width = int(
-        video.get("width") or 0
+    logger.info(
+        "Source video codec: %s",
+        video.get("codec_name"),
     )
 
-    height = int(
-        video.get("height") or 0
-    )
-
-    video_codec = video.get(
-        "codec_name",
-        "",
-    )
-
-    audio_codec = (
+    logger.info(
+        "Source audio codec: %s",
         audio.get("codec_name")
-        if audio
-        else None
-    )
-
-    logger.info(
-        "Input video: %sx%s",
-        width,
-        height,
-    )
-
-    logger.info(
-        "Input video codec: %s",
-        video_codec,
-    )
-
-    logger.info(
-        "Input audio codec: %s",
-        audio_codec,
-    )
-
-    logger.info(
-        "Input has audio: %s",
-        bool(audio),
+        if audio else "NONE",
     )
 
     # ========================================================
-    # SCALE TO MAX 720
+    # SCALE
     # ========================================================
 
     video_filter = (
@@ -416,7 +766,7 @@ def convert_video(input_file):
         "-map",
         "0:v:0",
 
-        # Audio if present
+        # Audio if available
         "-map",
         "0:a:0?",
 
@@ -424,7 +774,7 @@ def convert_video(input_file):
         "-vf",
         video_filter,
 
-        # H.264
+        # H264
         "-c:v",
         "libx264",
 
@@ -463,10 +813,6 @@ def convert_video(input_file):
         str(output_file),
     ]
 
-    logger.info(
-        "Running FFmpeg..."
-    )
-
     try:
 
         result = subprocess.run(
@@ -501,330 +847,56 @@ def convert_video(input_file):
     if not output_file.exists():
 
         return None, (
-            "FFmpeg did not create output."
+            "FFmpeg did not create output file."
         )
 
     # ========================================================
-    # VERIFY OUTPUT
+    # VERIFY
     # ========================================================
 
-    output_info = get_media_info(
+    final_info = get_media_info(
         output_file
     )
 
-    if not output_info:
+    if not final_info:
 
         return None, (
-            "Unable to verify output video."
+            "Unable to verify converted video."
         )
 
-    output_video = (
-        output_info.get("video")
+    final_video = final_info.get(
+        "video"
     )
 
-    output_audio = (
-        output_info.get("audio")
-    )
-
-    logger.info(
-        "Output video present: %s",
-        bool(output_video),
+    final_audio = final_info.get(
+        "audio"
     )
 
     logger.info(
-        "Output audio present: %s",
-        bool(output_audio),
+        "Final video stream: %s",
+        bool(final_video),
     )
 
-    if not output_video:
+    logger.info(
+        "Final audio stream: %s",
+        bool(final_audio),
+    )
+
+    if not final_video:
 
         return None, (
             "Final MP4 has no video."
         )
 
-    # If source had audio, final MUST have audio.
-    if audio and not output_audio:
+    # Only require audio if source had it.
+    if audio and not final_audio:
 
         return None, (
-            "Audio existed in the downloaded "
-            "file but disappeared during "
-            "FFmpeg conversion."
+            "Source contained audio but "
+            "FFmpeg output does not."
         )
 
     return output_file, None
-
-
-# ============================================================
-# YT-DLP OPTIONS
-# ============================================================
-
-def get_ydl_options(
-    output_template,
-    url,
-):
-
-    cookie_file = create_cookie_file()
-
-    options = {
-
-        # ====================================================
-        # IMPORTANT FORMAT SELECTION
-        # ====================================================
-
-        "format": (
-            "bv*[height<=720]+ba/"
-            "bv*[height<=1080]+ba/"
-            "bv*+ba/"
-            "b[height<=720]/"
-            "b[height<=1080]/"
-            "b"
-        ),
-
-        "outtmpl": output_template,
-
-        "noplaylist": True,
-
-        # Keep logs visible in Railway
-        "quiet": False,
-
-        "no_warnings": False,
-
-        "retries": 3,
-
-        "fragment_retries": 3,
-
-        "file_access_retries": 3,
-
-        "socket_timeout": 30,
-
-        "concurrent_fragment_downloads": 4,
-
-        # Let yt-dlp merge video/audio
-        "merge_output_format": "mp4",
-
-        "http_headers": {
-            "User-Agent":
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/140.0.0.0 "
-                "Safari/537.36",
-
-            "Accept":
-                "*/*",
-
-            "Accept-Language":
-                "en-US,en;q=0.9",
-        },
-    }
-
-    # ========================================================
-    # INSTAGRAM COOKIES
-    # ========================================================
-
-    if (
-        cookie_file
-        and "instagram.com" in url.lower()
-    ):
-
-        options["cookiefile"] = cookie_file
-
-        logger.info(
-            "Instagram cookies enabled."
-        )
-
-    return options
-
-
-# ============================================================
-# DOWNLOAD
-# ============================================================
-
-def download_video(url):
-
-    temp_dir = Path(
-        tempfile.mkdtemp(
-            dir=BASE_DIR
-        )
-    )
-
-    output_template = str(
-        temp_dir /
-        "%(id)s.%(ext)s"
-    )
-
-    options = get_ydl_options(
-        output_template,
-        url,
-    )
-
-    try:
-
-        logger.info(
-            "================================"
-        )
-
-        logger.info(
-            "Starting download"
-        )
-
-        logger.info(
-            "URL: %s",
-            url,
-        )
-
-        logger.info(
-            "================================"
-        )
-
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True,
-            )
-
-            if not info:
-
-                return None, (
-                    "yt-dlp returned no information."
-                )
-
-            # =================================================
-            # DEBUG INFORMATION
-            # =================================================
-
-            logger.info(
-                "Selected format: %s",
-                info.get("format"),
-            )
-
-            logger.info(
-                "Video codec: %s",
-                info.get("vcodec"),
-            )
-
-            logger.info(
-                "Audio codec: %s",
-                info.get("acodec"),
-            )
-
-            logger.info(
-                "Requested downloads: %s",
-                info.get(
-                    "requested_downloads"
-                ),
-            )
-
-            logger.info(
-                "Format ID: %s",
-                info.get("format_id"),
-            )
-
-        # ====================================================
-        # FIND MEDIA FILES
-        # ====================================================
-
-        media_files = []
-
-        for file in temp_dir.iterdir():
-
-            if not file.is_file():
-                continue
-
-            if file.suffix.lower() in (
-                ".mp4",
-                ".mkv",
-                ".webm",
-                ".mov",
-                ".m4v",
-            ):
-
-                media_files.append(
-                    file
-                )
-
-        if not media_files:
-
-            return None, (
-                "Downloaded media file "
-                "was not found."
-            )
-
-        # Largest media file
-        input_file = max(
-            media_files,
-            key=lambda p: p.stat().st_size,
-        )
-
-        logger.info(
-            "Downloaded file: %s",
-            input_file,
-        )
-
-        logger.info(
-            "Downloaded size: %.2f MB",
-            input_file.stat().st_size
-            / 1024
-            / 1024,
-        )
-
-        # ====================================================
-        # INSPECT DOWNLOADED FILE
-        # ====================================================
-
-        media_info = get_media_info(
-            input_file
-        )
-
-        if media_info:
-
-            downloaded_video = (
-                media_info.get("video")
-            )
-
-            downloaded_audio = (
-                media_info.get("audio")
-            )
-
-            logger.info(
-                "Downloaded video stream: %s",
-                bool(downloaded_video),
-            )
-
-            logger.info(
-                "Downloaded audio stream: %s",
-                bool(downloaded_audio),
-            )
-
-            if downloaded_audio:
-
-                logger.info(
-                    "Downloaded audio codec: %s",
-                    downloaded_audio.get(
-                        "codec_name"
-                    ),
-                )
-
-            else:
-
-                logger.warning(
-                    "WARNING: downloaded file "
-                    "contains NO AUDIO."
-                )
-
-        return input_file, None
-
-    except Exception as e:
-
-        logger.exception(
-            "yt-dlp error"
-        )
-
-        return None, str(e)
 
 
 # ============================================================
@@ -861,7 +933,7 @@ async def start_command(
 
 
 # ============================================================
-# STATUS ANIMATION
+# ANIMATED STATUS
 # ============================================================
 
 async def send_status(update):
@@ -873,22 +945,18 @@ async def send_status(update):
             "rb",
         ) as animation:
 
-            message = (
-                await update.message.reply_animation(
-                    animation=animation,
-                    caption=(
-                        "Thanks for providing "
-                        "the link!"
-                    ),
-                )
+            return await update.message.reply_animation(
+                animation=animation,
+                caption=(
+                    "Thanks for providing "
+                    "the link!"
+                ),
             )
-
-        return message
 
     except Exception as e:
 
         logger.error(
-            "Lightning animation error: %s",
+            "Animation error: %s",
             e,
         )
 
@@ -899,7 +967,7 @@ async def send_status(update):
 
 
 # ============================================================
-# MESSAGE HANDLER
+# MAIN MESSAGE HANDLER
 # ============================================================
 
 async def handle_message(
@@ -915,7 +983,7 @@ async def handle_message(
     url = extract_url(text)
 
     # ========================================================
-    # URL CHECK
+    # URL
     # ========================================================
 
     if not url:
@@ -927,7 +995,7 @@ async def handle_message(
         return
 
     # ========================================================
-    # SUPPORTED WEBSITE
+    # SUPPORTED
     # ========================================================
 
     if not is_supported_url(url):
@@ -944,14 +1012,14 @@ async def handle_message(
         return
 
     # ========================================================
-    # ANIMATION
+    # STATUS
     # ========================================================
 
     status = await send_status(
         update
     )
 
-    temp_dir = None
+    folder = None
 
     try:
 
@@ -964,7 +1032,7 @@ async def handle_message(
             action=ChatAction.UPLOAD_VIDEO,
         )
 
-        input_file, error = (
+        input_file, folder, error = (
             await asyncio.to_thread(
                 download_video,
                 url,
@@ -978,28 +1046,59 @@ async def handle_message(
             except Exception:
                 pass
 
+            # Better Instagram error
+            if (
+                is_instagram(url)
+                and (
+                    "empty media response"
+                    in error.lower()
+                    or "authentication"
+                    in error.lower()
+                    or "cookies"
+                    in error.lower()
+                )
+            ):
+
+                message = (
+                    "❌ Instagram could not provide "
+                    "the media to yt-dlp.\n\n"
+                    "Possible reasons:\n"
+                    "• Instagram requires login\n"
+                    "• Instagram cookies are expired\n"
+                    "• The Reel is restricted\n"
+                    "• Instagram temporarily blocked "
+                    "the Railway server IP\n"
+                    "• Instagram changed its media API\n\n"
+                    "Make sure INSTAGRAM_COOKIES_B64 "
+                    "contains fresh cookies."
+                )
+
+            else:
+
+                message = (
+                    "❌ Download failed.\n\n"
+                    "Technical reason:\n\n"
+                    f"{error[-3000:]}"
+                )
+
             await update.message.reply_text(
-                "❌ Download failed.\n\n"
-                "Technical reason:\n\n"
-                f"{error[-3500:]}"
+                message
             )
 
             return
-
-        temp_dir = input_file.parent
 
         # ====================================================
         # CONVERT
         # ====================================================
 
-        output_file, error = (
+        output_file, conversion_error = (
             await asyncio.to_thread(
                 convert_video,
                 input_file,
             )
         )
 
-        if error:
+        if conversion_error:
 
             try:
                 await status.delete()
@@ -1009,13 +1108,13 @@ async def handle_message(
             await update.message.reply_text(
                 "❌ Video conversion failed.\n\n"
                 "Technical reason:\n\n"
-                f"{error[-3500:]}"
+                f"{conversion_error[-3000:]}"
             )
 
             return
 
         # ====================================================
-        # FINAL CHECK
+        # FINAL INFO
         # ====================================================
 
         final_info = get_media_info(
@@ -1035,15 +1134,7 @@ async def handle_message(
 
             return
 
-        final_video = (
-            final_info.get("video")
-        )
-
-        final_audio = (
-            final_info.get("audio")
-        )
-
-        if not final_video:
+        if not final_info.get("video"):
 
             try:
                 await status.delete()
@@ -1051,33 +1142,33 @@ async def handle_message(
                 pass
 
             await update.message.reply_text(
-                "❌ Final video has no video stream."
+                "❌ Final file contains no video."
             )
 
             return
 
-        if not final_audio:
+        # ====================================================
+        # AUDIO INFORMATION
+        # ====================================================
 
-            try:
-                await status.delete()
-            except Exception:
-                pass
-
-            await update.message.reply_text(
-                "❌ The final video has no audio.\n\n"
-                "Please check the Railway logs. "
-                "The bot now reports the selected "
-                "video and audio formats."
-            )
-
-            return
-
-        logger.info(
-            "Final audio codec: %s",
-            final_audio.get(
-                "codec_name"
-            ),
+        final_audio = final_info.get(
+            "audio"
         )
+
+        if final_audio:
+
+            logger.info(
+                "Final audio codec: %s",
+                final_audio.get(
+                    "codec_name"
+                ),
+            )
+
+        else:
+
+            logger.warning(
+                "Final file has no audio."
+            )
 
         # ====================================================
         # SIZE
@@ -1088,7 +1179,7 @@ async def handle_message(
         )
 
         logger.info(
-            "Final size: %.2f MB",
+            "Final file: %.2f MB",
             file_size / 1024 / 1024,
         )
 
@@ -1108,7 +1199,7 @@ async def handle_message(
             return
 
         # ====================================================
-        # DELETE ANIMATION
+        # REMOVE ANIMATION
         # ====================================================
 
         try:
@@ -1149,21 +1240,21 @@ async def handle_message(
 
         await update.message.reply_text(
             "❌ Something went wrong.\n\n"
-            f"{str(e)[:3500]}"
+            f"{str(e)[:3000]}"
         )
 
     finally:
 
-        if temp_dir:
+        if folder:
 
             await asyncio.to_thread(
                 cleanup_folder,
-                temp_dir,
+                folder,
             )
 
 
 # ============================================================
-# TELEGRAM ERROR
+# ERROR HANDLER
 # ============================================================
 
 async def error_handler(
@@ -1193,11 +1284,11 @@ def main():
     create_lightning_gif()
 
     logger.info(
-        "================================"
+        "=========================================="
     )
 
     logger.info(
-        "Telegram downloader starting"
+        "Telegram Video Downloader"
     )
 
     logger.info(
@@ -1206,7 +1297,7 @@ def main():
     )
 
     logger.info(
-        "FFmpeg available: %s",
+        "FFmpeg: %s",
         check_ffmpeg(),
     )
 
@@ -1216,7 +1307,7 @@ def main():
     )
 
     logger.info(
-        "================================"
+        "=========================================="
     )
 
     application = (
