@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import base64
 import tempfile
@@ -57,7 +58,7 @@ USER_AGENT = (
 
 
 # ============================================================
-# URL HELPERS
+# URL
 # ============================================================
 
 def extract_url(text):
@@ -102,11 +103,15 @@ def get_cookie_file(temp_dir):
                 )
             )
 
-            if cookie_file.stat().st_size > 0:
+            if cookie_file.exists() and cookie_file.stat().st_size > 0:
                 return str(cookie_file)
 
         except Exception as e:
-            print("Cookie error:", e)
+            print(
+                "Cookie error:",
+                e,
+                flush=True,
+            )
 
     # Local cookies.txt
     local = Path("cookies.txt")
@@ -124,8 +129,12 @@ def get_cookie_file(temp_dir):
 def ffmpeg_available():
 
     try:
+
         result = subprocess.run(
-            ["ffmpeg", "-version"],
+            [
+                "ffmpeg",
+                "-version",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
@@ -138,96 +147,106 @@ def ffmpeg_available():
 
 
 # ============================================================
-# MEDIA INFO
+# MEDIA PROBE
 # ============================================================
 
 def get_media_info(file):
 
-    info = {
-        "video": False,
-        "audio": False,
-        "codec": "",
-        "width": 0,
-        "height": 0,
-    }
-
     try:
 
-        video = subprocess.run(
+        result = subprocess.run(
             [
                 "ffprobe",
                 "-v",
                 "error",
-                "-select_streams",
-                "v:0",
                 "-show_entries",
-                "stream=codec_name,width,height",
+                "stream="
+                "index,"
+                "codec_type,"
+                "codec_name,"
+                "width,"
+                "height,"
+                "pix_fmt",
                 "-of",
-                "default=noprint_wrappers=1",
+                "json",
                 str(file),
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
         )
 
-        if video.returncode == 0:
+        if result.returncode != 0:
 
-            info["video"] = True
+            print(
+                "FFprobe error:",
+                result.stderr[-2000:],
+                flush=True,
+            )
 
-            for line in video.stdout.splitlines():
+            return None
 
-                if "=" not in line:
-                    continue
+        data = json.loads(result.stdout)
 
-                key, value = line.split("=", 1)
+        streams = data.get("streams", [])
 
-                if key == "codec_name":
-                    info["codec"] = value
+        video = None
+        audio = None
 
-                elif key == "width":
-                    try:
-                        info["width"] = int(value)
-                    except ValueError:
-                        pass
+        for stream in streams:
 
-                elif key == "height":
-                    try:
-                        info["height"] = int(value)
-                    except ValueError:
-                        pass
+            if stream.get("codec_type") == "video":
+                if video is None:
+                    video = stream
 
-        audio = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "csv=p=0",
-                str(file),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+            elif stream.get("codec_type") == "audio":
+                if audio is None:
+                    audio = stream
 
-        info["audio"] = bool(
-            audio.stdout.strip()
-        )
+        if video is None:
+            return None
+
+        return {
+            "codec": video.get(
+                "codec_name",
+                "",
+            ),
+
+            "width": int(
+                video.get(
+                    "width",
+                    0,
+                ) or 0
+            ),
+
+            "height": int(
+                video.get(
+                    "height",
+                    0,
+                ) or 0
+            ),
+
+            "pix_fmt": video.get(
+                "pix_fmt",
+                "",
+            ),
+
+            "audio": audio is not None,
+        }
 
     except Exception as e:
 
-        print("ffprobe error:", e)
+        print(
+            "Probe error:",
+            e,
+            flush=True,
+        )
 
-    return info
+        return None
 
 
 # ============================================================
-# FIND DOWNLOADED FILE
+# FIND DOWNLOADED VIDEO
 # ============================================================
 
 def find_video(temp_dir):
@@ -253,58 +272,84 @@ def find_video(temp_dir):
     if not files:
         return None
 
-    # Prefer MP4
-    mp4 = [
-        f for f in files
-        if f.suffix.lower() == ".mp4"
+    mp4_files = [
+        file
+        for file in files
+        if file.suffix.lower() == ".mp4"
     ]
 
-    if mp4:
+    if mp4_files:
+
         return max(
-            mp4,
-            key=lambda f: f.stat().st_size
+            mp4_files,
+            key=lambda x: x.stat().st_size,
         )
 
     return max(
         files,
-        key=lambda f: f.stat().st_size
+        key=lambda x: x.stat().st_size,
     )
 
 
 # ============================================================
-# FAST VIDEO CONVERSION
+# VIDEO CONVERSION
 # ============================================================
 
 def convert_video(source, temp_dir):
 
     if not ffmpeg_available():
-        return None, "FFmpeg is not installed."
+
+        return (
+            None,
+            "FFmpeg is not installed.",
+        )
 
     info = get_media_info(source)
 
-    if not info["video"]:
-        return None, "Downloaded file has no video stream."
+    if not info:
 
-    output = Path(temp_dir) / "final.mp4"
+        return (
+            None,
+            "FFmpeg could not read the downloaded video.",
+        )
+
+    output = (
+        Path(temp_dir) /
+        "final.mp4"
+    )
+
+    print(
+        "Media information:",
+        info,
+        flush=True,
+    )
 
     # --------------------------------------------------------
-    # Already compatible
+    # FAST PATH
+    # Already H.264 + MP4 + 720p or below + yuv420p
     # --------------------------------------------------------
 
-    if (
+    compatible = (
         source.suffix.lower() == ".mp4"
         and info["codec"] == "h264"
-        and info["width"]
-        and info["height"]
+        and info["pix_fmt"] in (
+            "yuv420p",
+            "yuvj420p",
+        )
+        and info["width"] > 0
+        and info["height"] > 0
         and max(
             info["width"],
-            info["height"]
+            info["height"],
         ) <= MAX_HEIGHT
-    ):
+    )
+
+    if compatible:
 
         command = [
             "ffmpeg",
             "-y",
+
             "-i",
             str(source),
 
@@ -320,6 +365,7 @@ def convert_video(source, temp_dir):
             command += [
                 "-map",
                 "0:a:0?",
+
                 "-c:a",
                 "copy",
             ]
@@ -327,20 +373,33 @@ def convert_video(source, temp_dir):
         command += [
             "-movflags",
             "+faststart",
+
             str(output),
         ]
 
-    # --------------------------------------------------------
-    # Convert
-    # --------------------------------------------------------
-
     else:
+
+        # ----------------------------------------------------
+        # CONVERSION
+        # ----------------------------------------------------
+
+        # Resize while preserving aspect ratio.
+        #
+        # Example:
+        # 1440x2560 -> 405x720
+        #
+        # Padding ensures even dimensions for H.264.
 
         video_filter = (
             "scale="
             "w='min(720,iw)':"
             "h='min(720,ih)':"
-            "force_original_aspect_ratio=decrease"
+            "force_original_aspect_ratio=decrease,"
+            "pad="
+            "ceil(iw/2)*2:"
+            "ceil(ih/2)*2:"
+            "(ow-iw)/2:"
+            "(oh-ih)/2"
         )
 
         command = [
@@ -350,12 +409,14 @@ def convert_video(source, temp_dir):
             "-i",
             str(source),
 
+            # Video stream
             "-map",
             "0:v:0",
 
             "-vf",
             video_filter,
 
+            # H.264
             "-c:v",
             "libx264",
 
@@ -363,14 +424,30 @@ def convert_video(source, temp_dir):
             "veryfast",
 
             "-crf",
-            "27",
+            "28",
 
+            # iPhone-compatible pixel format
             "-pix_fmt",
             "yuv420p",
 
+            # Limit frame rate
             "-r",
             "30",
+
+            # Use all available CPU threads
+            "-threads",
+            "0",
         ]
+
+        # ----------------------------------------------------
+        # AUDIO
+        # ----------------------------------------------------
+        #
+        # IMPORTANT:
+        # Some Instagram videos have NO AUDIO STREAM.
+        #
+        # Therefore audio options are added only when
+        # an audio stream actually exists.
 
         if info["audio"]:
 
@@ -394,8 +471,18 @@ def convert_video(source, temp_dir):
         command += [
             "-movflags",
             "+faststart",
+
+            "-avoid_negative_ts",
+            "make_zero",
+
             str(output),
         ]
+
+    print(
+        "FFmpeg command:",
+        " ".join(command),
+        flush=True,
+    )
 
     try:
 
@@ -404,32 +491,55 @@ def convert_video(source, temp_dir):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=240,
+            timeout=300,
         )
 
         if result.returncode != 0:
 
+            error = (
+                result.stderr[-4000:]
+                if result.stderr
+                else "Unknown FFmpeg error."
+            )
+
             print(
-                "FFmpeg error:",
-                result.stderr[-3000:],
+                "\n========== FFMPEG ERROR ==========\n",
+                error,
+                "\n===================================\n",
+                flush=True,
             )
 
             return (
                 None,
-                "Video conversion failed."
+                "Video conversion failed.\n\n"
+                + error,
             )
 
         if not output.exists():
+
             return (
                 None,
-                "FFmpeg did not create the MP4."
+                "FFmpeg did not create the MP4 file.",
             )
 
         if output.stat().st_size <= 0:
+
             return (
                 None,
-                "Final MP4 is empty."
+                "FFmpeg created an empty MP4 file.",
             )
+
+        print(
+            "Conversion successful:",
+            output,
+            flush=True,
+        )
+
+        print(
+            "Final size:",
+            f"{output.stat().st_size / 1024 / 1024:.2f} MB",
+            flush=True,
+        )
 
         return output, None
 
@@ -437,14 +547,14 @@ def convert_video(source, temp_dir):
 
         return (
             None,
-            "Video conversion timed out."
+            "Video conversion timed out after 5 minutes.",
         )
 
     except Exception as e:
 
         return (
             None,
-            f"{type(e).__name__}: {e}"
+            f"FFmpeg error: {type(e).__name__}: {e}",
         )
 
 
@@ -461,12 +571,22 @@ def ydl_options(temp_dir, cookie=None):
             "video_%(id)s.%(ext)s"
         ),
 
-        # FAST:
-        # Prefer a single combined format.
-        # Fall back to other available formats.
+        # ----------------------------------------------------
+        # FORMAT
+        # ----------------------------------------------------
+        #
+        # First try a single combined video.
+        # This is faster.
+        #
+        # Then try separate video/audio streams.
+        #
+        # Finally use whatever format is available.
+
         "format": (
             "best[height<=720]/"
+            "best[height<=1080]/"
             "bestvideo[height<=720]+bestaudio/"
+            "bestvideo[height<=1080]+bestaudio/"
             "best"
         ),
 
@@ -476,17 +596,31 @@ def ydl_options(temp_dir, cookie=None):
 
         "max_filesize": MAX_SIZE,
 
-        # Small retry count = faster failure
-        "retries": 1,
-        "fragment_retries": 1,
-        "file_access_retries": 1,
+        # ----------------------------------------------------
+        # RETRIES
+        # ----------------------------------------------------
 
-        "socket_timeout": 10,
+        "retries": 2,
+
+        "fragment_retries": 2,
+
+        "file_access_retries": 2,
+
+        "socket_timeout": 15,
+
+        # ----------------------------------------------------
+        # DOWNLOAD
+        # ----------------------------------------------------
 
         "continuedl": True,
+
         "overwrites": True,
 
         "concurrent_fragment_downloads": 4,
+
+        # ----------------------------------------------------
+        # HEADERS
+        # ----------------------------------------------------
 
         "http_headers": {
             "User-Agent": USER_AGENT,
@@ -494,7 +628,10 @@ def ydl_options(temp_dir, cookie=None):
         },
 
         "quiet": True,
+
         "no_warnings": True,
+
+        "noprogress": True,
     }
 
     if cookie:
@@ -509,22 +646,25 @@ def ydl_options(temp_dir, cookie=None):
 
 def download_video(url, temp_dir):
 
-    attempts = []
+    errors = []
 
     # Public attempt first
-    attempt_cookies = [None]
+    cookies = [None]
 
-    # Instagram gets authenticated fallback
+    # Instagram authenticated fallback
     if is_instagram(url):
 
         cookie = get_cookie_file(temp_dir)
 
         if cookie:
-            attempt_cookies.append(cookie)
+            cookies.append(cookie)
 
-    for cookie in attempt_cookies:
+    for cookie in cookies:
 
-        # Remove old files before retry
+        # ----------------------------------------------------
+        # Remove previous downloaded files
+        # ----------------------------------------------------
+
         for file in Path(temp_dir).iterdir():
 
             if (
@@ -535,6 +675,7 @@ def download_video(url, temp_dir):
 
                 try:
                     file.unlink()
+
                 except OSError:
                     pass
 
@@ -543,11 +684,17 @@ def download_video(url, temp_dir):
             cookie,
         )
 
+        # ----------------------------------------------------
+        # Instagram headers
+        # ----------------------------------------------------
+
         if is_instagram(url):
 
             options["http_headers"].update({
+
                 "Referer":
                     "https://www.instagram.com/",
+
                 "Origin":
                     "https://www.instagram.com/",
             })
@@ -556,9 +703,11 @@ def download_video(url, temp_dir):
 
             print(
                 "Download attempt:",
-                "authenticated"
-                if cookie
-                else "public",
+                (
+                    "authenticated"
+                    if cookie
+                    else "public"
+                ),
                 flush=True,
             )
 
@@ -573,34 +722,49 @@ def download_video(url, temp_dir):
 
             source = find_video(temp_dir)
 
-            if source:
+            if not source:
 
-                print(
-                    "Downloaded:",
-                    source,
-                    flush=True,
+                errors.append(
+                    "No video file was created."
                 )
 
-                return convert_video(
-                    source,
-                    temp_dir,
-                )
+                continue
 
-            attempts.append(
-                "No video file was created."
+            print(
+                "Downloaded:",
+                source,
+                flush=True,
             )
+
+            # ------------------------------------------------
+            # CONVERT
+            # ------------------------------------------------
+
+            video, error = convert_video(
+                source,
+                temp_dir,
+            )
+
+            if video:
+
+                return video, None
+
+            # Conversion failed.
+            # Return the real FFmpeg error immediately.
+
+            return None, error
 
         except yt_dlp.utils.DownloadError as e:
 
             error = str(e)
 
             print(
-                "yt-dlp:",
+                "yt-dlp error:",
                 error,
                 flush=True,
             )
 
-            attempts.append(error)
+            errors.append(error)
 
         except Exception as e:
 
@@ -608,33 +772,38 @@ def download_video(url, temp_dir):
                 f"{type(e).__name__}: {e}"
             )
 
-            print(error, flush=True)
+            print(
+                error,
+                flush=True,
+            )
 
-            attempts.append(error)
+            errors.append(error)
 
-    error = "\n\n".join(attempts)
+    # ========================================================
+    # FRIENDLY ERRORS
+    # ========================================================
 
-    # Friendly errors
+    error = "\n\n".join(errors)
+
     low = error.lower()
 
-    if (
-        "requested format is not available"
-        in low
-    ):
+    if "requested format is not available" in low:
 
-        message = (
-            "Instagram did not provide the "
-            "requested format."
+        return (
+            None,
+            "The requested video format "
+            "is not available."
         )
 
-    elif "no video formats found" in low:
+    if "no video formats found" in low:
 
-        message = (
+        return (
+            None,
             "No downloadable video format "
-            "was provided by Instagram."
+            "was provided by the platform."
         )
 
-    elif any(
+    if any(
         x in low
         for x in (
             "login required",
@@ -644,48 +813,53 @@ def download_video(url, temp_dir):
         )
     ):
 
-        message = (
-            "Instagram requires authentication. "
-            "Your cookies may be expired."
+        return (
+            None,
+            "Authentication is required. "
+            "Your Instagram cookies may be expired."
         )
 
-    elif "private" in low:
+    if "private" in low:
 
-        message = (
+        return (
+            None,
             "This video is private or "
             "your account cannot access it."
         )
 
-    elif (
+    if (
         "403" in low
         or "forbidden" in low
         or "access denied" in low
     ):
 
-        message = (
+        return (
+            None,
             "The platform denied access "
             "to this video."
         )
 
-    elif (
+    if (
         "429" in low
         or "rate limit" in low
     ):
 
-        message = (
+        return (
+            None,
             "The platform is rate-limiting "
             "the bot. Try again later."
         )
 
-    else:
-
-        message = error[-3000:]
-
-    return None, message
+    return (
+        None,
+        error[-4000:]
+        if error
+        else "Unknown download error."
+    )
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 async def start(
@@ -697,14 +871,18 @@ async def start(
         return
 
     await update.message.reply_text(
+
         "👋 Social Video Downloader\n\n"
+
         "📥 Send a video URL.\n\n"
+
         "Supported:\n"
         "📸 Instagram\n"
         "▶️ YouTube\n"
         "🎬 YouTube Shorts\n"
         "🎵 TikTok\n"
         "📘 Facebook\n\n"
+
         "⚡ Fast download\n"
         "🎬 H.264 MP4\n"
         "📺 Max 720p\n"
@@ -713,7 +891,7 @@ async def start(
 
 
 # ============================================================
-# /HELP
+# HELP
 # ============================================================
 
 async def help_command(
@@ -721,7 +899,10 @@ async def help_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    await start(update, context)
+    await start(
+        update,
+        context,
+    )
 
 
 # ============================================================
@@ -741,6 +922,10 @@ async def handle_message(
     if not text:
         return
 
+    # --------------------------------------------------------
+    # URL
+    # --------------------------------------------------------
+
     url = extract_url(text)
 
     if not url:
@@ -750,6 +935,10 @@ async def handle_message(
         )
 
         return
+
+    # --------------------------------------------------------
+    # PLATFORM
+    # --------------------------------------------------------
 
     if not is_supported(url):
 
@@ -765,6 +954,10 @@ async def handle_message(
 
         return
 
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
     status = await update.message.reply_text(
         "⚡ Finding video..."
     )
@@ -776,16 +969,27 @@ async def handle_message(
             action=ChatAction.UPLOAD_VIDEO,
         )
 
+        # ----------------------------------------------------
+        # TEMP DIRECTORY
+        # ----------------------------------------------------
+
         with tempfile.TemporaryDirectory(
             prefix="video_"
         ) as temp_dir:
 
-            # Download in background
+            # ------------------------------------------------
+            # DOWNLOAD IN BACKGROUND
+            # ------------------------------------------------
+
             video, error = await asyncio.to_thread(
                 download_video,
                 url,
                 temp_dir,
             )
+
+            # ------------------------------------------------
+            # FAILED
+            # ------------------------------------------------
 
             if not video:
 
@@ -799,18 +1003,29 @@ async def handle_message(
 
                 return
 
+            # ------------------------------------------------
+            # SIZE
+            # ------------------------------------------------
+
             size = video.stat().st_size
 
             if size > MAX_SIZE:
 
                 await status.edit_text(
+
                     "❌ Video is too large.\n\n"
+
                     f"Size: "
                     f"{size / 1024 / 1024:.1f} MB\n"
+
                     "Maximum: 45 MB"
                 )
 
                 return
+
+            # ------------------------------------------------
+            # UPLOAD
+            # ------------------------------------------------
 
             await status.edit_text(
                 "📤 Sending video..."
@@ -821,6 +1036,7 @@ async def handle_message(
                 with video.open("rb") as file:
 
                     await update.message.reply_video(
+
                         video=file,
 
                         caption=(
@@ -831,22 +1047,33 @@ async def handle_message(
                         supports_streaming=True,
 
                         read_timeout=180,
+
                         write_timeout=180,
+
                         connect_timeout=30,
+
                         pool_timeout=30,
                     )
 
             except Exception as e:
 
                 await status.edit_text(
+
                     "❌ Telegram upload failed.\n\n"
+
                     f"{type(e).__name__}: {e}"
                 )
 
                 return
 
+            # ------------------------------------------------
+            # DELETE STATUS
+            # ------------------------------------------------
+
             try:
+
                 await status.delete()
+
             except Exception:
                 pass
 
@@ -854,14 +1081,16 @@ async def handle_message(
 
         print(
             "Handler error:",
-            e,
+            repr(e),
             flush=True,
         )
 
         try:
 
             await status.edit_text(
+
                 "❌ Something went wrong.\n\n"
+
                 f"{type(e).__name__}: {e}"
             )
 
@@ -870,7 +1099,7 @@ async def handle_message(
 
 
 # ============================================================
-# TELEGRAM ERROR
+# TELEGRAM ERROR HANDLER
 # ============================================================
 
 async def error_handler(
@@ -911,17 +1140,27 @@ def main():
 
     print(
         "FFmpeg:",
-        "OK" if ffmpeg_available()
-        else "NOT FOUND",
+        (
+            "OK"
+            if ffmpeg_available()
+            else "NOT FOUND"
+        ),
         flush=True,
     )
 
     print(
         "Instagram cookies:",
-        "YES" if INSTAGRAM_COOKIES_B64
-        else "NO",
+        (
+            "YES"
+            if INSTAGRAM_COOKIES_B64
+            else "NO"
+        ),
         flush=True,
     )
+
+    # --------------------------------------------------------
+    # TELEGRAM APP
+    # --------------------------------------------------------
 
     app = (
         Application
@@ -929,6 +1168,10 @@ def main():
         .token(BOT_TOKEN)
         .build()
     )
+
+    # --------------------------------------------------------
+    # COMMANDS
+    # --------------------------------------------------------
 
     app.add_handler(
         CommandHandler(
@@ -943,6 +1186,10 @@ def main():
             help_command,
         )
     )
+
+    # --------------------------------------------------------
+    # URL MESSAGES
+    # --------------------------------------------------------
 
     app.add_handler(
         MessageHandler(
@@ -959,6 +1206,10 @@ def main():
         "🚀 Bot is running...",
         flush=True,
     )
+
+    # --------------------------------------------------------
+    # POLLING
+    # --------------------------------------------------------
 
     app.run_polling(
         drop_pending_updates=True
