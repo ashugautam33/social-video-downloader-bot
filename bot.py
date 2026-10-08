@@ -31,23 +31,18 @@ from telegram.ext import (
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Optional Instagram/Facebook Netscape cookies.txt
-INSTAGRAM_COOKIES_B64 = os.getenv(
+SOCIAL_COOKIES_B64 = os.getenv(
     "INSTAGRAM_COOKIES_B64"
 )
 
-# Telegram safety limit
 MAX_FILE_SIZE = 45 * 1024 * 1024
-
-# Maximum output video height
 MAX_VIDEO_HEIGHT = 720
 
-# Temporary working directory
 BASE_DIR = (
     Path(tempfile.gettempdir())
     / "universal_media_downloader"
@@ -64,7 +59,7 @@ LIGHTNING_GIF = (
 
 
 # ============================================================
-# FILE EXTENSIONS
+# EXTENSIONS
 # ============================================================
 
 VIDEO_EXTENSIONS = {
@@ -95,9 +90,16 @@ IMAGE_EXTENSIONS = {
     ".jpeg",
     ".png",
     ".webp",
-    ".gif",
     ".bmp",
     ".tiff",
+}
+
+SVG_EXTENSIONS = {
+    ".svg",
+}
+
+GIF_EXTENSIONS = {
+    ".gif",
 }
 
 
@@ -115,7 +117,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(
-    "UniversalMediaBot"
+    "UniversalMediaDownloader"
 )
 
 
@@ -138,9 +140,7 @@ def create_lightning_gif():
             (0, 0, 0, 0),
         )
 
-        draw = ImageDraw.Draw(
-            image
-        )
+        draw = ImageDraw.Draw(image)
 
         pulse = (
             1.0
@@ -177,7 +177,6 @@ def create_lightning_gif():
             ),
         ]
 
-        # Glow
         for width, alpha in (
             (30, 25),
             (20, 45),
@@ -196,7 +195,6 @@ def create_lightning_gif():
                 joint="curve",
             )
 
-        # Lightning body
         draw.polygon(
             points,
             fill=(
@@ -207,7 +205,6 @@ def create_lightning_gif():
             ),
         )
 
-        # White outline
         draw.line(
             points + [points[0]],
             fill=(
@@ -253,16 +250,14 @@ def extract_url(text):
         ".,!?)]}"
     )
 
-    return normalize_social_url(
-        url
-    )
+    return normalize_url(url)
 
 
 # ============================================================
-# URL NORMALIZATION
+# FACEBOOK URL NORMALIZATION
 # ============================================================
 
-def normalize_social_url(url):
+def normalize_url(url):
 
     if not url:
         return url
@@ -271,16 +266,12 @@ def normalize_social_url(url):
 
         parts = urlsplit(url)
 
-        host = (
-            parts.netloc
-            .lower()
-        )
-
+        host = parts.netloc.lower()
         path = parts.path.lower()
 
-        # ====================================================
-        # FACEBOOK LOGIN REDIRECT
-        # ====================================================
+        # ----------------------------------------------------
+        # Facebook login redirect
+        # ----------------------------------------------------
 
         if (
             "facebook.com" in host
@@ -297,31 +288,29 @@ def normalize_social_url(url):
 
             if next_values:
 
-                next_url = next_values[0]
-
                 next_url = unquote(
-                    next_url
+                    next_values[0]
                 )
 
                 logger.info(
                     "Facebook login redirect detected."
                 )
 
-                logger.info(
-                    "Recovered Facebook URL: %s",
-                    next_url,
-                )
-
-                return normalize_social_url(
+                return normalize_url(
                     next_url
                 )
 
-        # ====================================================
-        # FACEBOOK TRACKING PARAMETERS
-        # ====================================================
+        # ----------------------------------------------------
+        # Facebook
+        # ----------------------------------------------------
 
-        if "facebook.com" in host:
+        if (
+            "facebook.com" in host
+            or "fb.watch" in host
+        ):
 
+            # Keep useful query parameters for
+            # Facebook story/share URLs.
             return urlunsplit(
                 (
                     parts.scheme,
@@ -332,9 +321,9 @@ def normalize_social_url(url):
                 )
             )
 
-        # ====================================================
-        # OTHER SOCIAL SITES
-        # ====================================================
+        # ----------------------------------------------------
+        # Other websites
+        # ----------------------------------------------------
 
         return urlunsplit(
             (
@@ -346,18 +335,13 @@ def normalize_social_url(url):
             )
         )
 
-    except Exception as e:
-
-        logger.warning(
-            "URL normalization error: %s",
-            e,
-        )
+    except Exception:
 
         return url
 
 
 # ============================================================
-# URL TYPES
+# WEBSITE CHECKS
 # ============================================================
 
 def is_instagram(url):
@@ -378,33 +362,13 @@ def is_facebook(url):
     )
 
 
-def is_direct_media_url(url):
-
-    path = urlsplit(url).path.lower()
-
-    extensions = (
-        VIDEO_EXTENSIONS
-        | AUDIO_EXTENSIONS
-        | IMAGE_EXTENSIONS
-    )
-
-    return any(
-        path.endswith(ext)
-        for ext in extensions
-    )
-
-
 # ============================================================
-# COOKIE FILE
+# COOKIE CREATION
 # ============================================================
 
 def create_cookie_file():
 
-    if not INSTAGRAM_COOKIES_B64:
-
-        logger.info(
-            "No Instagram/Facebook cookies configured."
-        )
+    if not SOCIAL_COOKIES_B64:
 
         return None
 
@@ -416,13 +380,13 @@ def create_cookie_file():
     try:
 
         value = (
-            INSTAGRAM_COOKIES_B64
+            SOCIAL_COOKIES_B64
             .strip()
         )
 
-        # ====================================================
-        # TRY BASE64
-        # ====================================================
+        # ----------------------------------------------------
+        # Base64
+        # ----------------------------------------------------
 
         try:
 
@@ -437,7 +401,6 @@ def create_cookie_file():
 
         if decoded:
 
-            # Remove UTF-8 BOM
             if decoded.startswith(
                 b"\xef\xbb\xbf"
             ):
@@ -453,22 +416,19 @@ def create_cookie_file():
             except UnicodeDecodeError:
 
                 logger.error(
-                    "Cookie data is not UTF-8 text."
+                    "Cookie data is not UTF-8."
                 )
 
                 return None
 
         else:
 
-            # =================================================
             # Plain cookies.txt
-            # =================================================
-
             text = value
 
-        # ====================================================
-        # VALIDATE NETSCAPE FORMAT
-        # ====================================================
+        # ----------------------------------------------------
+        # Validate Netscape cookies
+        # ----------------------------------------------------
 
         if (
             "# Netscape HTTP Cookie File"
@@ -477,7 +437,7 @@ def create_cookie_file():
         ):
 
             logger.error(
-                "Invalid Netscape cookies.txt."
+                "Invalid cookies.txt format."
             )
 
             return None
@@ -487,23 +447,22 @@ def create_cookie_file():
             encoding="utf-8",
         )
 
-        logger.info(
-            "Social cookies loaded successfully."
+        return str(
+            cookie_file
         )
-
-        return str(cookie_file)
 
     except Exception as e:
 
-        logger.exception(
-            "Cookie processing failed."
+        logger.error(
+            "Cookie processing error: %s",
+            e,
         )
 
         return None
 
 
 # ============================================================
-# FFMPEG CHECK
+# FFMPEG
 # ============================================================
 
 def ffmpeg_available():
@@ -555,7 +514,6 @@ def probe(file_path):
         )
 
         if result.returncode != 0:
-
             return None
 
         return json.loads(
@@ -567,10 +525,6 @@ def probe(file_path):
         return None
 
 
-# ============================================================
-# STREAM DETECTION
-# ============================================================
-
 def get_streams(file_path):
 
     data = probe(
@@ -578,7 +532,6 @@ def get_streams(file_path):
     )
 
     if not data:
-
         return None, None
 
     streams = data.get(
@@ -624,27 +577,28 @@ def detect_media_type(file_path):
     )
 
     if extension in VIDEO_EXTENSIONS:
-
         return "video"
 
     if extension in AUDIO_EXTENSIONS:
-
         return "audio"
 
     if extension in IMAGE_EXTENSIONS:
-
         return "image"
+
+    if extension in SVG_EXTENSIONS:
+        return "svg"
+
+    if extension in GIF_EXTENSIONS:
+        return "gif"
 
     video, audio = get_streams(
         file_path
     )
 
     if video:
-
         return "video"
 
     if audio:
-
         return "audio"
 
     return "document"
@@ -661,10 +615,9 @@ def build_ydl_options(
 
     options = {
 
-        # ----------------------------------------------------
-        # Best video + best audio
-        # ----------------------------------------------------
-
+        # Best video that may already
+        # contain audio, then separate
+        # audio if required.
         "format": (
             "bv*+ba/"
             "b"
@@ -672,8 +625,8 @@ def build_ydl_options(
 
         "outtmpl": output_template,
 
-        # Instagram/Facebook carousels
-        # can contain multiple entries.
+        # Needed for Instagram/TikTok
+        # carousels/slideshows.
         "noplaylist": False,
 
         "quiet": False,
@@ -692,10 +645,8 @@ def build_ydl_options(
 
         "concurrent_fragment_downloads": 4,
 
-        # Merge video + audio into MP4
         "merge_output_format": "mp4",
 
-        # Don't download metadata files
         "writethumbnail": False,
 
         "writeinfojson": False,
@@ -704,7 +655,6 @@ def build_ydl_options(
 
         "writeautomaticsub": False,
 
-        # Browser-like headers
         "http_headers": {
 
             "User-Agent":
@@ -717,18 +667,16 @@ def build_ydl_options(
                     "Safari/537.36"
                 ),
 
-            "Accept":
-                "*/*",
+            "Accept": "*/*",
 
             "Accept-Language":
                 "en-US,en;q=0.9",
-
         },
     }
 
-    # ========================================================
-    # COOKIES
-    # ========================================================
+    # --------------------------------------------------------
+    # Instagram / Facebook cookies
+    # --------------------------------------------------------
 
     if (
         is_instagram(url)
@@ -741,18 +689,26 @@ def build_ydl_options(
 
         if cookie_file:
 
-            options["cookiefile"] = (
-                cookie_file
-            )
+            options[
+                "cookiefile"
+            ] = cookie_file
 
     return options
 
 
 # ============================================================
-# FIND DOWNLOADED FILES
+# FIND DOWNLOADED MEDIA
 # ============================================================
 
 def find_media_files(folder):
+
+    supported = (
+        VIDEO_EXTENSIONS
+        | AUDIO_EXTENSIONS
+        | IMAGE_EXTENSIONS
+        | SVG_EXTENSIONS
+        | GIF_EXTENSIONS
+    )
 
     files = []
 
@@ -761,31 +717,16 @@ def find_media_files(folder):
         if not file.is_file():
             continue
 
-        suffix = (
-            file.suffix.lower()
-        )
-
         if (
-            suffix in VIDEO_EXTENSIONS
-            or suffix in AUDIO_EXTENSIONS
-            or suffix in IMAGE_EXTENSIONS
+            file.suffix.lower()
+            not in supported
         ):
+            continue
 
-            files.append(file)
+        if file.stat().st_size <= 100:
+            continue
 
-    # --------------------------------------------------------
-    # Remove tiny / empty files
-    # --------------------------------------------------------
-
-    files = [
-        file
-        for file in files
-        if file.stat().st_size > 100
-    ]
-
-    # --------------------------------------------------------
-    # Sort
-    # --------------------------------------------------------
+        files.append(file)
 
     files.sort(
         key=lambda x: x.name
@@ -795,18 +736,17 @@ def find_media_files(folder):
 
 
 # ============================================================
-# DOWNLOAD MEDIA
+# DOWNLOAD
 # ============================================================
 
 def download_media(url):
 
-    # Normalize URL first
-    url = normalize_social_url(
+    url = normalize_url(
         url
     )
 
     logger.info(
-        "Final URL: %s",
+        "Normalized URL: %s",
         url,
     )
 
@@ -819,16 +759,6 @@ def download_media(url):
 
     output_template = str(
         folder
-        / "%(playlist_index&{}|)s%(id)s.%(ext)s"
-    )
-
-    # --------------------------------------------------------
-    # Some extractors don't provide playlist_index correctly.
-    # Use a simpler fallback template.
-    # --------------------------------------------------------
-
-    output_template = str(
-        folder
         / "%(autonumber)03d_%(id)s.%(ext)s"
     )
 
@@ -836,11 +766,7 @@ def download_media(url):
         url
     ]
 
-    # --------------------------------------------------------
-    # Clean URL
-    # --------------------------------------------------------
-
-    cleaned = normalize_social_url(
+    cleaned = normalize_url(
         url
     )
 
@@ -850,7 +776,6 @@ def download_media(url):
             cleaned
         )
 
-    # Remove duplicates
     attempts = list(
         dict.fromkeys(
             attempts
@@ -859,19 +784,14 @@ def download_media(url):
 
     last_error = None
 
-    for attempt_number, current_url in enumerate(
+    for number, current_url in enumerate(
         attempts,
         start=1,
     ):
 
         logger.info(
-            "Download attempt %s",
-            attempt_number,
-        )
-
-        logger.info(
-            "URL: %s",
-            current_url,
+            "Download attempt %d",
+            number,
         )
 
         try:
@@ -909,7 +829,7 @@ def download_media(url):
                     )
 
                     logger.info(
-                        "Media type: %s",
+                        "Type: %s",
                         info.get(
                             "_type"
                         ),
@@ -931,11 +851,6 @@ def download_media(url):
         )
 
         if files:
-
-            logger.info(
-                "Found %d media files.",
-                len(files),
-            )
 
             return (
                 files,
@@ -979,11 +894,6 @@ def convert_video(
             "No video stream found.",
         )
 
-    width = int(
-        video.get("width")
-        or 0
-    )
-
     height = int(
         video.get("height")
         or 0
@@ -1000,25 +910,12 @@ def convert_video(
     )
 
     logger.info(
-        "Video: %sx%s codec=%s pix_fmt=%s",
-        width,
-        height,
+        "Input video: codec=%s height=%s pixel=%s audio=%s",
         codec,
+        height,
         pixel_format,
+        bool(audio),
     )
-
-    logger.info(
-        "Audio: %s",
-        (
-            audio.get("codec_name")
-            if audio
-            else "NONE"
-        ),
-    )
-
-    # --------------------------------------------------------
-    # Keep aspect ratio, maximum 720p
-    # --------------------------------------------------------
 
     video_filter = (
         "scale="
@@ -1033,19 +930,16 @@ def convert_video(
     )
 
     command = [
-
         "ffmpeg",
-
         "-y",
 
         "-i",
         str(input_file),
 
-        # Video
         "-map",
         "0:v:0",
 
-        # Audio is optional
+        # Optional audio
         "-map",
         "0:a:0?",
 
@@ -1067,7 +961,6 @@ def convert_video(
         "-r",
         "30",
 
-        # Audio
         "-c:a",
         "aac",
 
@@ -1080,7 +973,6 @@ def convert_video(
         "-ac",
         "2",
 
-        # Streaming
         "-movflags",
         "+faststart",
 
@@ -1104,7 +996,7 @@ def convert_video(
 
         return (
             None,
-            "FFmpeg conversion timed out.",
+            "Video conversion timed out.",
         )
 
     except Exception as e:
@@ -1116,11 +1008,6 @@ def convert_video(
 
     if result.returncode != 0:
 
-        logger.error(
-            "FFmpeg error: %s",
-            result.stderr[-4000:],
-        )
-
         return (
             None,
             result.stderr[-4000:],
@@ -1130,7 +1017,7 @@ def convert_video(
 
         return (
             None,
-            "FFmpeg output was not created.",
+            "FFmpeg output missing.",
         )
 
     output_video, output_audio = (
@@ -1143,10 +1030,9 @@ def convert_video(
 
         return (
             None,
-            "Converted file contains no video.",
+            "Output has no video.",
         )
 
-    # If source had audio, make sure output has audio
     if audio and not output_audio:
 
         return (
@@ -1169,10 +1055,10 @@ async def send_image(
     file,
 ):
 
-    size = file.stat().st_size
-
-    # Telegram photo limit safety
-    if size <= 10 * 1024 * 1024:
+    if (
+        file.stat().st_size
+        <= 10 * 1024 * 1024
+    ):
 
         with open(
             file,
@@ -1194,6 +1080,64 @@ async def send_image(
                 document=image,
                 caption="🖼️ Image",
             )
+
+
+# ============================================================
+# SEND SVG
+# ============================================================
+
+async def send_svg(
+    update,
+    file,
+):
+
+    if (
+        file.stat().st_size
+        > MAX_FILE_SIZE
+    ):
+
+        raise RuntimeError(
+            "SVG file is too large."
+        )
+
+    with open(
+        file,
+        "rb",
+    ) as svg:
+
+        await update.message.reply_document(
+            document=svg,
+            filename=file.name,
+            caption="🎨 SVG",
+        )
+
+
+# ============================================================
+# SEND GIF
+# ============================================================
+
+async def send_gif(
+    update,
+    file,
+):
+
+    if (
+        file.stat().st_size
+        > MAX_FILE_SIZE
+    ):
+
+        raise RuntimeError(
+            "GIF file is too large."
+        )
+
+    with open(
+        file,
+        "rb",
+    ) as gif:
+
+        await update.message.reply_animation(
+            animation=gif
+        )
 
 
 # ============================================================
@@ -1239,7 +1183,7 @@ async def send_document(
     ):
 
         raise RuntimeError(
-            "File is too large for Telegram."
+            "File is too large."
         )
 
     with open(
@@ -1261,10 +1205,6 @@ async def send_video(
     file,
 ):
 
-    file = Path(
-        file
-    )
-
     information = probe(
         file
     )
@@ -1283,9 +1223,9 @@ async def send_video(
 
     video_stream = next(
         (
-            stream
-            for stream in streams
-            if stream.get(
+            x
+            for x in streams
+            if x.get(
                 "codec_type"
             ) == "video"
         ),
@@ -1294,9 +1234,9 @@ async def send_video(
 
     audio_stream = next(
         (
-            stream
-            for stream in streams
-            if stream.get(
+            x
+            for x in streams
+            if x.get(
                 "codec_type"
             ) == "audio"
         ),
@@ -1325,10 +1265,6 @@ async def send_video(
         or 0
     )
 
-    # --------------------------------------------------------
-    # Determine whether conversion is necessary
-    # --------------------------------------------------------
-
     needs_conversion = (
         codec != "h264"
         or pixel_format != "yuv420p"
@@ -1340,10 +1276,6 @@ async def send_video(
     final_file = file
 
     if needs_conversion:
-
-        logger.info(
-            "Video requires conversion."
-        )
 
         converted, error = (
             await asyncio.to_thread(
@@ -1361,10 +1293,6 @@ async def send_video(
 
         final_file = converted
 
-    # --------------------------------------------------------
-    # Final size
-    # --------------------------------------------------------
-
     if (
         final_file.stat().st_size
         > MAX_FILE_SIZE
@@ -1372,13 +1300,8 @@ async def send_video(
 
         return (
             False,
-            "Final video is larger than "
-            "the Telegram upload limit.",
+            "Final video is too large.",
         )
-
-    # --------------------------------------------------------
-    # Verify audio
-    # --------------------------------------------------------
 
     final_video, final_audio = (
         get_streams(
@@ -1392,10 +1315,6 @@ async def send_video(
             False,
             "The final video has no audio.",
         )
-
-    # --------------------------------------------------------
-    # Send
-    # --------------------------------------------------------
 
     with open(
         final_file,
@@ -1415,7 +1334,7 @@ async def send_video(
 
 
 # ============================================================
-# SEND MEDIA
+# SEND ANY MEDIA
 # ============================================================
 
 async def send_media_file(
@@ -1423,14 +1342,12 @@ async def send_media_file(
     file,
 ):
 
-    media_type = (
-        detect_media_type(
-            file
-        )
+    media_type = detect_media_type(
+        file
     )
 
     logger.info(
-        "Sending %s: %s",
+        "Media type: %s | %s",
         media_type,
         file.name,
     )
@@ -1466,6 +1383,30 @@ async def send_media_file(
             None,
         )
 
+    if media_type == "svg":
+
+        await send_svg(
+            update,
+            file,
+        )
+
+        return (
+            True,
+            None,
+        )
+
+    if media_type == "gif":
+
+        await send_gif(
+            update,
+            file,
+        )
+
+        return (
+            True,
+            None,
+        )
+
     await send_document(
         update,
         file,
@@ -1478,7 +1419,7 @@ async def send_media_file(
 
 
 # ============================================================
-# STATUS MESSAGE
+# STATUS
 # ============================================================
 
 async def send_status(
@@ -1499,12 +1440,7 @@ async def send_status(
                 ),
             )
 
-    except Exception as e:
-
-        logger.error(
-            "Lightning animation error: %s",
-            e,
-        )
+    except Exception:
 
         return await update.message.reply_text(
             "Thanks for providing the link!\n\n"
@@ -1513,7 +1449,7 @@ async def send_status(
 
 
 # ============================================================
-# START COMMAND
+# START
 # ============================================================
 
 async def start_command(
@@ -1522,22 +1458,22 @@ async def start_command(
 ):
 
     await update.message.reply_text(
-        "👋 Welcome to Universal Media Downloader!\n\n"
+        "👋 Universal Media Downloader\n\n"
 
-        "🔗 Send me any supported media link.\n\n"
+        "Send me a media link.\n\n"
 
-        "I can download:\n"
-        "🎬 Videos\n"
+        "Supported:\n"
+        "🎬 Video\n"
         "🎵 Audio\n"
         "🖼️ Photos\n"
+        "🎨 SVG\n"
+        "🎞️ GIF\n"
         "📚 Carousels\n"
-        "📱 Reels\n"
-        "▶️ YouTube Shorts\n"
-        "📹 Facebook videos\n"
-        "🎵 TikTok media\n\n"
+        "📱 Reels / Shorts\n\n"
 
-        "The bot automatically detects "
-        "the media type."
+        "Works with Instagram, Facebook, "
+        "YouTube, TikTok, X/Twitter and "
+        "many other yt-dlp supported sites."
     )
 
 
@@ -1551,7 +1487,6 @@ async def handle_message(
 ):
 
     if not update.message:
-
         return
 
     text = (
@@ -1567,7 +1502,7 @@ async def handle_message(
     if not url:
 
         await update.message.reply_text(
-            "❌ Please send a valid HTTP/HTTPS media URL."
+            "❌ Please send a valid media URL."
         )
 
         return
@@ -1577,10 +1512,6 @@ async def handle_message(
         url,
     )
 
-    # ========================================================
-    # STATUS
-    # ========================================================
-
     status = await send_status(
         update
     )
@@ -1588,10 +1519,6 @@ async def handle_message(
     folder = None
 
     try:
-
-        # ====================================================
-        # DOWNLOAD
-        # ====================================================
 
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
@@ -1606,7 +1533,7 @@ async def handle_message(
         )
 
         # ====================================================
-        # DOWNLOAD ERROR
+        # DOWNLOAD FAILED
         # ====================================================
 
         if error:
@@ -1616,84 +1543,80 @@ async def handle_message(
             except Exception:
                 pass
 
-            error_lower = (
-                error.lower()
-            )
+            error_lower = error.lower()
 
-            # -----------------------------------------------
-            # Facebook authentication
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # Facebook
+            # ------------------------------------------------
 
-            if is_facebook(url) and (
-                "login"
-                in error_lower
-                or "unsupported url"
-                in error_lower
-                or "authentication"
-                in error_lower
-                or "cookies"
-                in error_lower
-                or "private"
-                in error_lower
-                or "unable to download"
-                in error_lower
-            ):
+            if is_facebook(url):
 
-                message = (
-                    "❌ Facebook could not provide "
-                    "the media.\n\n"
+                if (
+                    "unsupported url"
+                    in error_lower
+                    or "login"
+                    in error_lower
+                    or "authentication"
+                    in error_lower
+                    or "private"
+                    in error_lower
+                    or "cookies"
+                    in error_lower
+                    or "empty"
+                    in error_lower
+                ):
 
-                    "Possible reasons:\n"
-                    "• Facebook requires login\n"
-                    "• The post is private/restricted\n"
-                    "• Facebook redirected the request "
-                    "to login\n"
-                    "• Facebook cookies are missing/expired\n"
-                    "• The video is unavailable\n\n"
+                    await update.message.reply_text(
+                        "❌ Facebook could not provide "
+                        "this media.\n\n"
 
-                    "If this post is visible only after "
-                    "logging into Facebook, configure "
-                    "valid Facebook cookies in "
-                    "INSTAGRAM_COOKIES_B64."
-                )
+                        "The URL was converted from "
+                        "Facebook's login redirect, "
+                        "but Facebook is still requiring "
+                        "access to the post.\n\n"
 
-            # -----------------------------------------------
-            # Instagram authentication
-            # -----------------------------------------------
+                        "Possible reasons:\n"
+                        "• Login required\n"
+                        "• Private/restricted post\n"
+                        "• Expired Facebook cookies\n"
+                        "• Facebook blocked the request\n"
+                        "• Media no longer available\n\n"
 
-            elif is_instagram(url) and (
-                "empty media"
-                in error_lower
-                or "login"
-                in error_lower
-                or "cookies"
-                in error_lower
-                or "authentication"
-                in error_lower
-            ):
+                        "For media that requires your "
+                        "Facebook login, configure valid "
+                        "cookies in Railway using:\n\n"
+                        "INSTAGRAM_COOKIES_B64"
+                    )
 
-                message = (
+                    return
+
+            # ------------------------------------------------
+            # Instagram
+            # ------------------------------------------------
+
+            if is_instagram(url):
+
+                await update.message.reply_text(
                     "❌ Instagram could not provide "
-                    "the media.\n\n"
+                    "this media.\n\n"
 
                     "Possible reasons:\n"
                     "• Login required\n"
-                    "• Cookies expired\n"
-                    "• Private/restricted post\n"
-                    "• Instagram blocked the request\n\n"
-
-                    "Check your Instagram cookies."
+                    "• Private post\n"
+                    "• Expired cookies\n"
+                    "• Instagram blocked the request\n"
+                    "• Media unavailable"
                 )
 
-            else:
+                return
 
-                message = (
-                    "❌ Download failed.\n\n"
-                    f"{error[-3000:]}"
-                )
+            # ------------------------------------------------
+            # General error
+            # ------------------------------------------------
 
             await update.message.reply_text(
-                message
+                "❌ Download failed.\n\n"
+                f"{error[-3000:]}"
             )
 
             return
@@ -1711,14 +1634,14 @@ async def handle_message(
             pass
 
         # ====================================================
-        # SEND FILES
+        # SEND MEDIA
         # ====================================================
-
-        sent = 0
 
         total = len(
             files
         )
+
+        sent = 0
 
         for index, file in enumerate(
             files,
@@ -1726,11 +1649,10 @@ async def handle_message(
         ):
 
             if not file.exists():
-
                 continue
 
             logger.info(
-                "Processing media %s/%s: %s",
+                "Sending %d/%d: %s",
                 index,
                 total,
                 file.name,
@@ -1764,16 +1686,17 @@ async def handle_message(
             except Exception as e:
 
                 logger.exception(
-                    "Media send error."
+                    "Media sending error."
                 )
 
                 await update.message.reply_text(
-                    "⚠️ Could not send one media file.\n\n"
+                    "⚠️ One media file could not "
+                    "be sent.\n\n"
                     f"{str(e)[:1500]}"
                 )
 
         # ====================================================
-        # FINAL RESULT
+        # RESULT
         # ====================================================
 
         if sent == 0:
@@ -1792,7 +1715,7 @@ async def handle_message(
     except Exception as e:
 
         logger.exception(
-            "Universal downloader error."
+            "Unexpected error."
         )
 
         try:
@@ -1811,7 +1734,7 @@ async def handle_message(
     finally:
 
         # ====================================================
-        # CLEAN TEMP FILES
+        # CLEANUP
         # ====================================================
 
         if folder and folder.exists():
@@ -1839,7 +1762,7 @@ async def error_handler(
 ):
 
     logger.exception(
-        "Telegram application error",
+        "Telegram error",
         exc_info=context.error,
     )
 
@@ -1853,8 +1776,7 @@ def main():
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN environment variable "
-            "is missing."
+            "BOT_TOKEN is not configured."
         )
 
     create_lightning_gif()
@@ -1868,19 +1790,19 @@ def main():
     )
 
     logger.info(
-        "yt-dlp version: %s",
+        "yt-dlp: %s",
         yt_dlp.version.__version__,
     )
 
     logger.info(
-        "FFmpeg available: %s",
+        "FFmpeg: %s",
         ffmpeg_available(),
     )
 
     logger.info(
         "Cookies configured: %s",
         bool(
-            INSTAGRAM_COOKIES_B64
+            SOCIAL_COOKIES_B64
         ),
     )
 
@@ -1894,7 +1816,6 @@ def main():
         .build()
     )
 
-    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -1902,7 +1823,6 @@ def main():
         )
     )
 
-    # URLs sent as normal text
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -1911,7 +1831,6 @@ def main():
         )
     )
 
-    # Captions containing URLs
     application.add_handler(
         MessageHandler(
             filters.CaptionRegex(
@@ -1926,7 +1845,7 @@ def main():
     )
 
     logger.info(
-        "Bot started."
+        "Bot is running..."
     )
 
     application.run_polling(
@@ -1935,7 +1854,7 @@ def main():
 
 
 # ============================================================
-# START BOT
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
