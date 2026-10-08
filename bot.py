@@ -32,16 +32,20 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Telegram practical upload limit
+# Telegram upload safety limit
 MAX_FILE_SIZE = 45 * 1024 * 1024
 
-# Maximum video height when compression is required
+# Maximum video height after compression
 MAX_VIDEO_HEIGHT = 720
 
-# Maximum number of playlist items
+# Maximum playlist items
 MAX_PLAYLIST_ITEMS = 20
 
-# Temporary working directory
+
+# ============================================================
+# TEMP DIRECTORIES
+# ============================================================
+
 BASE_DIR = (
     Path(tempfile.gettempdir())
     / "universal_media_downloader"
@@ -72,8 +76,8 @@ COOKIE_DIR.mkdir(
 # ============================================================
 
 logging.basicConfig(
-    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
 )
 
 logger = logging.getLogger(
@@ -135,7 +139,7 @@ ALL_MEDIA_EXTENSIONS = (
 
 
 # ============================================================
-# PLATFORM COOKIE VARIABLES
+# COOKIE ENVIRONMENT VARIABLES
 # ============================================================
 
 COOKIE_ENV = {
@@ -173,6 +177,7 @@ USER_AGENT = (
 def detect_platform(url: str) -> str:
 
     try:
+
         host = urlparse(url).netloc.lower()
 
         if host.startswith("www."):
@@ -275,7 +280,7 @@ def normalize_url(url: str) -> str:
 
         host = parsed.netloc.lower()
 
-        # Facebook login redirect
+        # Handle Facebook login redirects
         if (
             "facebook.com" in host
             and parsed.path.startswith("/login")
@@ -295,9 +300,7 @@ def normalize_url(url: str) -> str:
                     next_values[0]
                 )
 
-                if target.startswith(
-                    "http"
-                ):
+                if target.startswith("http"):
                     return target
 
         return url
@@ -308,7 +311,7 @@ def normalize_url(url: str) -> str:
 
 
 # ============================================================
-# DIRECT MEDIA URL
+# DIRECT MEDIA URL CHECK
 # ============================================================
 
 def is_direct_media_url(url: str) -> bool:
@@ -319,8 +322,7 @@ def is_direct_media_url(url: str) -> bool:
 
         return any(
             path.endswith(extension)
-            for extension
-            in ALL_MEDIA_EXTENSIONS
+            for extension in ALL_MEDIA_EXTENSIONS
         )
 
     except Exception:
@@ -329,7 +331,7 @@ def is_direct_media_url(url: str) -> bool:
 
 
 # ============================================================
-# COOKIE FILE CREATION
+# COOKIE FILE
 # ============================================================
 
 def create_cookie_file(
@@ -348,10 +350,6 @@ def create_cookie_file(
     )
 
     if not encoded:
-        logger.info(
-            "No cookies configured for %s",
-            platform,
-        )
         return None
 
     encoded = encoded.strip()
@@ -368,7 +366,7 @@ def create_cookie_file(
             validate=True,
         )
 
-        text = decoded.decode(
+        cookie_text = decoded.decode(
             "utf-8"
         )
 
@@ -382,19 +380,17 @@ def create_cookie_file(
 
         return None
 
-    valid_header = (
-        text.startswith(
+    if not (
+        cookie_text.startswith(
             "# Netscape HTTP Cookie File"
         )
-        or text.startswith(
+        or cookie_text.startswith(
             "# HTTP Cookie File"
         )
-    )
-
-    if not valid_header:
+    ):
 
         logger.error(
-            "%s cookies are not Netscape format",
+            "Cookies for %s are not Netscape format.",
             platform,
         )
 
@@ -403,9 +399,8 @@ def create_cookie_file(
     try:
 
         cookie_file.write_text(
-            text,
+            cookie_text,
             encoding="utf-8",
-            newline="\n",
         )
 
         return str(
@@ -415,7 +410,7 @@ def create_cookie_file(
     except Exception as error:
 
         logger.error(
-            "Could not write cookie file: %s",
+            "Could not create cookie file: %s",
             error,
         )
 
@@ -433,16 +428,7 @@ def create_http_session():
     session.headers.update(
         {
             "User-Agent": USER_AGENT,
-            "Accept-Language": (
-                "en-US,en;q=0.9"
-            ),
-            "Accept": (
-                "text/html,"
-                "application/xhtml+xml,"
-                "application/xml;q=0.9,"
-                "image/avif,image/webp,"
-                "*/*;q=0.8"
-            ),
+            "Accept-Language": "en-US,en;q=0.9",
             "Connection": "keep-alive",
         }
     )
@@ -469,13 +455,13 @@ def safe_filename(
     )
 
     if not name:
-        name = "download"
+        name = "Downloaded_Media"
 
     return name[:180]
 
 
 # ============================================================
-# CONTENT TYPE -> EXTENSION
+# CONTENT TYPE EXTENSION
 # ============================================================
 
 def extension_from_content_type(
@@ -490,7 +476,6 @@ def extension_from_content_type(
     )
 
     mapping = {
-
         "video/mp4": ".mp4",
         "video/webm": ".webm",
         "video/quicktime": ".mov",
@@ -519,271 +504,52 @@ def extension_from_content_type(
 
 
 # ============================================================
-# DIRECT MEDIA DOWNLOAD
+# CLEANUP
 # ============================================================
 
-def direct_download(
-    url: str,
-    output_dir: Path,
+def cleanup_directory(
+    path: Path,
 ):
 
-    session = create_http_session()
+    try:
 
-    response = session.get(
-        url,
-        stream=True,
-        timeout=(20, 120),
-        allow_redirects=True,
-    )
+        if path.exists():
 
-    response.raise_for_status()
-
-    content_type = response.headers.get(
-        "Content-Type",
-        "",
-    )
-
-    filename = Path(
-        urlparse(
-            response.url
-        ).path
-    ).name
-
-    filename = safe_filename(
-        filename
-    )
-
-    extension = Path(
-        filename
-    ).suffix.lower()
-
-    if not extension:
-
-        extension = (
-            extension_from_content_type(
-                content_type
-            )
-        )
-
-        filename += extension
-
-    output_file = (
-        output_dir
-        / filename
-    )
-
-    total = 0
-
-    with open(
-        output_file,
-        "wb",
-    ) as file:
-
-        for chunk in response.iter_content(
-            chunk_size=256 * 1024
-        ):
-
-            if not chunk:
-                continue
-
-            total += len(chunk)
-
-            if total > MAX_FILE_SIZE:
-
-                file.close()
-
-                try:
-                    output_file.unlink()
-                except Exception:
-                    pass
-
-                raise RuntimeError(
-                    "The file is larger than the Telegram upload limit."
-                )
-
-            file.write(chunk)
-
-    return output_file
-
-
-# ============================================================
-# YT-DLP OPTIONS
-# ============================================================
-
-def build_ydl_options(
-    url: str,
-    platform: str,
-    output_dir: Path,
-    use_impersonation: bool = True,
-):
-
-    cookie_file = (
-        create_cookie_file(
-            platform
-        )
-    )
-
-    options = {
-
-        "outtmpl": str(
-            output_dir
-            / "%(title).120s_%(id)s.%(ext)s"
-        ),
-
-        # ====================================================
-        # ORIGINAL VIDEO + ORIGINAL AVAILABLE AUDIO
-        # ====================================================
-
-        "format": (
-            "bestvideo*+bestaudio/best"
-        ),
-
-        # MP4 container when merging is required.
-        "merge_output_format": "mp4",
-
-        "noplaylist": False,
-
-        "playlistend": MAX_PLAYLIST_ITEMS,
-
-        "quiet": True,
-
-        "no_warnings": False,
-
-        "retries": 3,
-
-        "fragment_retries": 3,
-
-        "file_access_retries": 3,
-
-        "socket_timeout": 30,
-
-        "continuedl": True,
-
-        "overwrites": False,
-
-        "max_filesize": MAX_FILE_SIZE,
-
-        "http_headers": {
-            "User-Agent": USER_AGENT,
-            "Accept-Language": (
-                "en-US,en;q=0.9"
-            ),
-        },
-
-        "writethumbnail": False,
-
-        "writeinfojson": False,
-
-        "writesubtitles": False,
-
-        "writeautomaticsub": False,
-
-        "download_archive": None,
-
-        "restrictfilenames": False,
-
-        # Avoid unnecessary postprocessing.
-        "postprocessors": [],
-
-    }
-
-    if cookie_file:
-
-        options[
-            "cookiefile"
-        ] = cookie_file
-
-    if use_impersonation:
-
-        options[
-            "impersonate"
-        ] = "chrome"
-
-    return options
-
-
-# ============================================================
-# YT-DLP DOWNLOAD
-# ============================================================
-
-def run_ytdlp(
-    url: str,
-    platform: str,
-    output_dir: Path,
-    use_impersonation: bool,
-):
-
-    options = build_ydl_options(
-        url=url,
-        platform=platform,
-        output_dir=output_dir,
-        use_impersonation=use_impersonation,
-    )
-
-    logger.info(
-        "yt-dlp | platform=%s | impersonation=%s",
-        platform,
-        use_impersonation,
-    )
-
-    with yt_dlp.YoutubeDL(
-        options
-    ) as ydl:
-
-        info = ydl.extract_info(
-            url,
-            download=True,
-        )
-
-        if not info:
-
-            raise RuntimeError(
-                "yt-dlp did not return media information."
+            shutil.rmtree(
+                path,
+                ignore_errors=True,
             )
 
-    files = find_media_files(
-        output_dir
-    )
+    except Exception as error:
 
-    if not files:
-
-        raise RuntimeError(
-            "yt-dlp completed but no media file was created."
+        logger.warning(
+            "Cleanup failed: %s",
+            error,
         )
-
-    return files
 
 
 # ============================================================
-# FIND MEDIA FILES
+# FIND DOWNLOADED MEDIA
 # ============================================================
 
 def find_media_files(
     directory: Path,
 ):
 
-    if not directory.exists():
-        return []
+    files = []
 
-    result = []
+    if not directory.exists():
+        return files
 
     for path in directory.rglob("*"):
 
         if not path.is_file():
             continue
 
-        ignored_suffixes = (
+        if path.suffix.lower() in {
             ".part",
             ".ytdl",
             ".temp",
-        )
-
-        if path.name.endswith(
-            ignored_suffixes
-        ):
-            continue
-
-        if path.suffix.lower() in {
             ".json",
             ".description",
         }:
@@ -797,150 +563,168 @@ def find_media_files(
         except Exception:
             continue
 
-        result.append(path)
+        files.append(
+            path
+        )
 
     return sorted(
-        result,
-        key=lambda item: item.stat().st_mtime,
+        files,
+        key=lambda p: p.stat().st_mtime,
     )
 
 
 # ============================================================
-# COMMAND RUNNER
+# FFMPEG
 # ============================================================
 
-def run_command(
+def run_ffmpeg(
     command,
-    timeout=300,
 ):
 
-    return subprocess.run(
+    logger.info(
+        "FFmpeg: %s",
+        " ".join(
+            map(str, command)
+        ),
+    )
+
+    result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
     )
 
+    if result.returncode != 0:
+
+        logger.error(
+            result.stderr[-3000:]
+        )
+
+        raise RuntimeError(
+            "FFmpeg failed."
+        )
+
+    return result
+
 
 # ============================================================
-# MEDIA PROBE
+# VIDEO INFORMATION
 # ============================================================
 
-def get_video_audio_info(
+def get_video_info(
     path: Path,
 ):
 
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,codec_name",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(path),
+    ]
+
     try:
 
-        result = run_command(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_streams",
-                "-of",
-                "json",
-                str(path),
-            ]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
 
-        if result.returncode != 0:
-            return None
+        values = {}
 
-        import json
+        for line in result.stdout.splitlines():
 
-        return json.loads(
-            result.stdout
+            if "=" in line:
+
+                key, value = line.split(
+                    "=",
+                    1,
+                )
+
+                values[key.strip()] = (
+                    value.strip()
+                )
+
+        width = int(
+            values.get(
+                "width",
+                "0",
+            )
         )
 
-    except Exception as error:
-
-        logger.warning(
-            "ffprobe failed: %s",
-            error,
+        height = int(
+            values.get(
+                "height",
+                "0",
+            )
         )
 
-        return None
+        codec = values.get(
+            "codec_name"
+        )
+
+        return (
+            width,
+            height,
+            codec,
+        )
+
+    except Exception:
+
+        return (
+            0,
+            0,
+            None,
+        )
 
 
-def has_audio_stream(
-    path: Path,
-) -> bool:
-
-    data = get_video_audio_info(
-        path
-    )
-
-    if not data:
-        return False
-
-    streams = data.get(
-        "streams",
-        []
-    )
-
-    return any(
-        stream.get("codec_type")
-        == "audio"
-        for stream in streams
-    )
-
+# ============================================================
+# AUDIO CODEC
+# ============================================================
 
 def get_audio_codec(
     path: Path,
 ):
 
-    data = get_video_audio_info(
-        path
-    )
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
 
-    if not data:
+    try:
+
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        codec = (
+            result.stdout.strip()
+        )
+
+        return codec or None
+
+    except Exception:
+
         return None
-
-    for stream in data.get(
-        "streams",
-        []
-    ):
-
-        if (
-            stream.get(
-                "codec_type"
-            )
-            == "audio"
-        ):
-
-            return (
-                stream.get(
-                    "codec_name"
-                )
-            )
-
-    return None
-
-
-# ============================================================
-# ORIGINAL AUDIO COMPATIBILITY
-# ============================================================
-
-def audio_codec_is_mp4_compatible(
-    codec: str | None,
-) -> bool:
-
-    if not codec:
-        return False
-
-    # Common codecs that can safely be used
-    # in MP4 without audio re-encoding.
-    compatible = {
-        "aac",
-        "alac",
-        "ac3",
-        "eac3",
-        "mp3",
-    }
-
-    return codec.lower() in compatible
 
 
 # ============================================================
@@ -948,321 +732,514 @@ def audio_codec_is_mp4_compatible(
 # ============================================================
 
 def convert_video(
-    path: Path,
+    input_path: Path,
+    output_path: Path,
 ):
 
-    output = path.with_name(
-        f"{path.stem}_converted.mp4"
-    )
-
-    audio_exists = has_audio_stream(
-        path
+    width, height, _ = (
+        get_video_info(
+            input_path
+        )
     )
 
     audio_codec = get_audio_codec(
-        path
+        input_path
     )
 
-    logger.info(
-        "Video conversion | audio=%s | codec=%s",
-        audio_exists,
-        audio_codec,
-    )
+    video_filter = []
 
-    # ========================================================
-    # FIRST ATTEMPT
-    #
-    # Video is converted to H264.
-    # Original audio is COPIED whenever possible.
-    # ========================================================
+    if (
+        height
+        and height > MAX_VIDEO_HEIGHT
+    ):
+
+        video_filter = [
+            "-vf",
+            f"scale=-2:{MAX_VIDEO_HEIGHT}",
+        ]
+
+    # Try to preserve original audio
+    # when it is compatible with MP4.
+    copy_audio_codecs = {
+        "aac",
+        "alac",
+        "ac3",
+        "eac3",
+        "mp3",
+    }
+
+    if audio_codec in copy_audio_codecs:
+
+        audio_options = [
+            "-c:a",
+            "copy",
+        ]
+
+    else:
+
+        audio_options = [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+        ]
 
     command = [
         "ffmpeg",
         "-y",
-
         "-i",
-        str(path),
+        str(input_path),
 
-        "-map",
-        "0:v:0",
-
-        "-vf",
-        (
-            f"scale="
-            f"'min(1280,iw)':"
-            f"'min({MAX_VIDEO_HEIGHT},ih)':"
-            f"force_original_aspect_ratio=decrease"
-        ),
-
-        "-r",
-        "30",
+        *video_filter,
 
         "-c:v",
         "libx264",
-
         "-preset",
         "veryfast",
-
         "-crf",
         "28",
 
-        "-pix_fmt",
-        "yuv420p",
+        *audio_options,
+
+        "-movflags",
+        "+faststart",
+
+        str(output_path),
     ]
 
-    if (
-        audio_exists
-        and audio_codec_is_mp4_compatible(
-            audio_codec
-        )
-    ):
-
-        # IMPORTANT:
-        # Keep original audio stream.
-        command.extend(
-            [
-                "-map",
-                "0:a:0?",
-                "-c:a",
-                "copy",
-            ]
-        )
-
-    elif audio_exists:
-
-        # ====================================================
-        # Original codec cannot safely be placed in MP4.
-        # Fallback only when necessary.
-        # ====================================================
-
-        command.extend(
-            [
-                "-map",
-                "0:a:0?",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-            ]
-        )
-
-    else:
-
-        command.extend(
-            [
-                "-an",
-            ]
-        )
-
-    command.extend(
-        [
-            "-movflags",
-            "+faststart",
-
-            str(output),
-        ]
+    run_ffmpeg(
+        command
     )
 
-    logger.info(
-        "FFmpeg conversion started: %s",
-        path.name,
-    )
-
-    result = run_command(
-        command,
-        timeout=600,
-    )
-
-    if result.returncode != 0:
-
-        logger.warning(
-            "First FFmpeg conversion failed."
-        )
-
-        logger.warning(
-            "%s",
-            result.stderr[-3000:],
-        )
-
-        # ====================================================
-        # FALLBACK
-        #
-        # Always use AAC if copying original audio failed.
-        # ====================================================
-
-        if audio_exists:
-
-            fallback_command = [
-                "ffmpeg",
-                "-y",
-
-                "-i",
-                str(path),
-
-                "-map",
-                "0:v:0",
-
-                "-vf",
-                (
-                    f"scale="
-                    f"'min(1280,iw)':"
-                    f"'min({MAX_VIDEO_HEIGHT},ih)':"
-                    f"force_original_aspect_ratio=decrease"
-                ),
-
-                "-r",
-                "30",
-
-                "-c:v",
-                "libx264",
-
-                "-preset",
-                "veryfast",
-
-                "-crf",
-                "28",
-
-                "-pix_fmt",
-                "yuv420p",
-
-                "-map",
-                "0:a:0?",
-
-                "-c:a",
-                "aac",
-
-                "-b:a",
-                "192k",
-
-                "-movflags",
-                "+faststart",
-
-                str(output),
-            ]
-
-            result = run_command(
-                fallback_command,
-                timeout=600,
-            )
-
-    if result.returncode != 0:
-
-        logger.error(
-            "FFmpeg failed:\n%s",
-            result.stderr[-5000:],
-        )
-
-        raise RuntimeError(
-            "FFmpeg could not convert the video."
-        )
-
-    if not output.exists():
-
-        raise RuntimeError(
-            "FFmpeg did not create the converted video."
-        )
-
-    try:
-        path.unlink()
-    except Exception:
-        pass
-
-    return output
+    return output_path
 
 
 # ============================================================
-# VIDEO PROCESSING
+# VIDEO SIZE PROCESSING
 # ============================================================
 
 def process_video_file(
     path: Path,
 ):
 
-    if not path.exists():
+    try:
+
+        size = path.stat().st_size
+
+    except Exception:
+
         return path
 
-    size = path.stat().st_size
-
-    # ========================================================
-    # IMPORTANT:
-    #
-    # If the downloaded file is already below Telegram limit,
-    # DO NOT TOUCH IT.
-    #
-    # This means original video AND original audio remain
-    # exactly as downloaded.
-    # ========================================================
-
+    # Keep original video/audio untouched
+    # when it is already small enough.
     if size <= MAX_FILE_SIZE:
-
-        logger.info(
-            "Video is within size limit. "
-            "Keeping original file unchanged: %s",
-            path.name,
-        )
 
         return path
 
     logger.info(
-        "Video exceeds Telegram limit. "
-        "Converting: %s",
-        path.name,
+        "Compressing %.2f MB video",
+        size / (1024 * 1024),
     )
 
-    return convert_video(
-        path
+    output_path = (
+        path.parent
+        / f"compressed_{path.stem}.mp4"
     )
-
-
-# ============================================================
-# CLEAN DIRECTORY
-# ============================================================
-
-def cleanup_directory(
-    directory: Path,
-):
-
-    if not directory.exists():
-        return
 
     try:
 
-        shutil.rmtree(
-            directory,
-            ignore_errors=True,
+        convert_video(
+            path,
+            output_path,
         )
 
-    except Exception as error:
+        if (
+            output_path.exists()
+            and output_path.stat().st_size
+            <= MAX_FILE_SIZE
+        ):
 
-        logger.warning(
-            "Cleanup failed: %s",
-            error,
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+            return output_path
+
+        # Second, stronger compression
+        aggressive_output = (
+            path.parent
+            / f"compressed2_{path.stem}.mp4"
         )
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(path),
+
+            "-vf",
+            "scale=-2:480",
+
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "veryfast",
+
+            "-crf",
+            "32",
+
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            "128k",
+
+            "-movflags",
+            "+faststart",
+
+            str(aggressive_output),
+        ]
+
+        run_ffmpeg(
+            command
+        )
+
+        if (
+            aggressive_output.exists()
+            and aggressive_output.stat().st_size
+            <= MAX_FILE_SIZE
+        ):
+
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+            try:
+
+                if output_path.exists():
+                    output_path.unlink()
+
+            except Exception:
+                pass
+
+            return aggressive_output
+
+        raise RuntimeError(
+            "Unable to compress video below Telegram's upload limit."
+        )
+
+    except Exception:
+
+        try:
+
+            if output_path.exists():
+                output_path.unlink()
+
+        except Exception:
+            pass
+
+        raise
 
 
 # ============================================================
-# UNIVERSAL DOWNLOAD
+# DIRECT MEDIA DOWNLOAD
+# ============================================================
+
+def direct_download(
+    url: str,
+    output_dir: Path,
+):
+
+    session = create_http_session()
+
+    logger.info(
+        "Direct download: %s",
+        url,
+    )
+
+    response = session.get(
+        url,
+        stream=True,
+        timeout=60,
+        allow_redirects=True,
+    )
+
+    response.raise_for_status()
+
+    content_type = response.headers.get(
+        "Content-Type",
+        "",
+    )
+
+    content_length = response.headers.get(
+        "Content-Length"
+    )
+
+    if content_length:
+
+        try:
+
+            if (
+                int(content_length)
+                > MAX_FILE_SIZE
+            ):
+
+                raise RuntimeError(
+                    "The media is larger than Telegram's upload limit."
+                )
+
+        except ValueError:
+            pass
+
+    extension = (
+        extension_from_content_type(
+            content_type
+        )
+    )
+
+    filename = (
+        "Downloaded_Media"
+        + extension
+    )
+
+    content_disposition = (
+        response.headers.get(
+            "Content-Disposition",
+            "",
+        )
+    )
+
+    match = re.search(
+        r'filename="?([^"]+)"?',
+        content_disposition,
+        re.IGNORECASE,
+    )
+
+    if match:
+
+        supplied_name = safe_filename(
+            match.group(1)
+        )
+
+        if Path(
+            supplied_name
+        ).suffix:
+
+            filename = supplied_name
+
+    output_path = (
+        output_dir
+        / filename
+    )
+
+    total = 0
+
+    with open(
+        output_path,
+        "wb",
+    ) as file:
+
+        for chunk in response.iter_content(
+            chunk_size=1024 * 1024
+        ):
+
+            if not chunk:
+                continue
+
+            total += len(chunk)
+
+            if total > MAX_FILE_SIZE:
+
+                try:
+                    file.close()
+                except Exception:
+                    pass
+
+                try:
+                    output_path.unlink()
+                except Exception:
+                    pass
+
+                raise RuntimeError(
+                    "The media is larger than Telegram's upload limit."
+                )
+
+            file.write(chunk)
+
+    return [
+        output_path
+    ]
+
+
+# ============================================================
+# YT-DLP OPTIONS
+# ============================================================
+
+def build_ydl_options(
+    output_dir: Path,
+    platform: str,
+):
+
+    options = {
+
+        # ====================================================
+        # IMPORTANT:
+        # Clean filename.
+        #
+        # No:
+        # %(title)s
+        # %(uploader)s
+        # %(id)s
+        #
+        # ====================================================
+
+        "outtmpl": str(
+            output_dir
+            / "Downloaded_Media.%(ext)s"
+        ),
+
+        # Best video + best available audio
+        "format": (
+            "bestvideo*+bestaudio/best"
+        ),
+
+        # Merge video/audio into MP4
+        "merge_output_format": "mp4",
+
+        # Playlist support
+        "noplaylist": False,
+
+        "playlistend": MAX_PLAYLIST_ITEMS,
+
+        # Performance
+        "concurrent_fragment_downloads": 4,
+
+        "retries": 3,
+
+        "fragment_retries": 3,
+
+        "socket_timeout": 30,
+
+        # Logging
+        "quiet": True,
+
+        "no_warnings": True,
+
+        # Don't generate extra files
+        "writethumbnail": False,
+
+        "writeinfojson": False,
+
+        "writedescription": False,
+
+        "writeautomaticsub": False,
+
+        "writesubtitles": False,
+
+        # HTTP
+        "http_headers": {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": (
+                "en-US,en;q=0.9"
+            ),
+        },
+    }
+
+    # ========================================================
+    # PLATFORM COOKIES
+    # ========================================================
+
+    cookie_file = create_cookie_file(
+        platform
+    )
+
+    if cookie_file:
+
+        options[
+            "cookiefile"
+        ] = cookie_file
+
+    # ========================================================
+    # CHROME IMPERSONATION
+    # ========================================================
+
+    options[
+        "impersonate"
+    ] = "chrome"
+
+    return options
+
+
+# ============================================================
+# YT-DLP DOWNLOAD
+# ============================================================
+
+def yt_dlp_download(
+    url: str,
+    output_dir: Path,
+    platform: str,
+):
+
+    options = build_ydl_options(
+        output_dir,
+        platform,
+    )
+
+    logger.info(
+        "yt-dlp downloading: %s",
+        url,
+    )
+
+    try:
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            ydl.download(
+                [url]
+            )
+
+    except Exception as first_error:
+
+        logger.warning(
+            "yt-dlp Chrome impersonation failed: %s",
+            first_error,
+        )
+
+        # Retry without impersonation
+        options.pop(
+            "impersonate",
+            None,
+        )
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            ydl.download(
+                [url]
+            )
+
+
+# ============================================================
+# DOWNLOAD MEDIA
 # ============================================================
 
 def download_media(
     url: str,
 ):
 
-    url = normalize_url(
-        url
-    )
-
-    platform = detect_platform(
-        url
-    )
-
-    job_name = next(
+    job_id = next(
         tempfile._get_candidate_names()
     )
 
     job_dir = (
         DOWNLOAD_DIR
-        / job_name
+        / job_id
     )
 
     job_dir.mkdir(
@@ -1270,10 +1247,8 @@ def download_media(
         exist_ok=True,
     )
 
-    logger.info(
-        "New job | %s | %s",
-        platform,
-        url,
+    platform = detect_platform(
+        url
     )
 
     try:
@@ -1286,135 +1261,94 @@ def download_media(
             url
         ):
 
-            logger.info(
-                "Direct media URL."
-            )
-
-            file_path = direct_download(
+            files = direct_download(
                 url,
                 job_dir,
             )
 
-            return (
+        # ====================================================
+        # YT-DLP
+        # ====================================================
+
+        else:
+
+            yt_dlp_download(
+                url,
                 job_dir,
-                [file_path],
+                platform,
             )
 
-        # ====================================================
-        # YT-DLP ATTEMPT
-        # ====================================================
-
-        first_error = None
-
-        try:
-
-            files = run_ytdlp(
-                url=url,
-                platform=platform,
-                output_dir=job_dir,
-                use_impersonation=True,
+            files = find_media_files(
+                job_dir
             )
 
-        except Exception as error:
+        if not files:
 
-            first_error = error
-
-            logger.warning(
-                "First attempt failed: %s",
-                error,
+            raise RuntimeError(
+                "No media files were found."
             )
 
-            # Remove partial files.
-            for item in job_dir.iterdir():
+        processed_files = []
 
-                try:
+        for path in files:
 
-                    if item.is_file():
-                        item.unlink()
-
-                    elif item.is_dir():
-                        shutil.rmtree(
-                            item,
-                            ignore_errors=True,
-                        )
-
-                except Exception:
-                    pass
+            suffix = (
+                path.suffix.lower()
+            )
 
             # =================================================
-            # SECOND ATTEMPT
-            # =================================================
-
-            files = run_ytdlp(
-                url=url,
-                platform=platform,
-                output_dir=job_dir,
-                use_impersonation=False,
-            )
-
-        # ====================================================
-        # PROCESS FILES
-        # ====================================================
-
-        final_files = []
-
-        for file_path in files:
-
-            if not file_path.exists():
-                continue
-
-            extension = (
-                file_path.suffix.lower()
-            )
-
-            # ------------------------------------------------
             # VIDEO
-            # ------------------------------------------------
+            # =================================================
 
-            if extension in VIDEO_EXTENSIONS:
+            if suffix in VIDEO_EXTENSIONS:
 
-                file_path = (
+                processed = (
                     process_video_file(
-                        file_path
+                        path
                     )
                 )
 
-            # ------------------------------------------------
-            # SIZE CHECK
-            # ------------------------------------------------
-
-            if not file_path.exists():
-                continue
-
-            file_size = (
-                file_path.stat().st_size
-            )
-
-            if file_size <= 0:
-                continue
-
-            if file_size > MAX_FILE_SIZE:
-
-                logger.warning(
-                    "Skipping oversized file: %s",
-                    file_path.name,
+                processed_files.append(
+                    processed
                 )
 
-                continue
+            # =================================================
+            # AUDIO / IMAGE / GIF
+            # =================================================
 
-            final_files.append(
-                file_path
-            )
+            elif suffix in (
+                AUDIO_EXTENSIONS
+                | IMAGE_EXTENSIONS
+                | OTHER_MEDIA_EXTENSIONS
+            ):
 
-        if not final_files:
+                try:
+
+                    size = path.stat().st_size
+
+                except FileNotFoundError:
+
+                    continue
+
+                if size > MAX_FILE_SIZE:
+
+                    raise RuntimeError(
+                        f"{path.name} is larger than Telegram's upload limit."
+                    )
+
+                processed_files.append(
+                    path
+                )
+
+        if not processed_files:
 
             raise RuntimeError(
-                "No usable media files were produced."
+                "No supported media files were found."
             )
 
         return (
             job_dir,
-            final_files,
+            processed_files,
         )
 
     except Exception:
@@ -1427,37 +1361,7 @@ def download_media(
 
 
 # ============================================================
-# FILE TYPE
-# ============================================================
-
-def get_file_type(
-    path: Path,
-):
-
-    extension = (
-        path.suffix.lower()
-    )
-
-    if extension in VIDEO_EXTENSIONS:
-        return "video"
-
-    if extension in AUDIO_EXTENSIONS:
-        return "audio"
-
-    if extension in IMAGE_EXTENSIONS:
-        return "image"
-
-    if extension == ".gif":
-        return "gif"
-
-    if extension == ".svg":
-        return "svg"
-
-    return "document"
-
-
-# ============================================================
-# TELEGRAM SEND
+# SEND FILE
 # ============================================================
 
 async def send_file(
@@ -1465,33 +1369,23 @@ async def send_file(
     path: Path,
 ):
 
-    if not path.exists():
-        return
+    suffix = (
+        path.suffix.lower()
+    )
 
-    if path.stat().st_size <= 0:
-        return
+    size = path.stat().st_size
 
-    if path.stat().st_size > MAX_FILE_SIZE:
+    if size > MAX_FILE_SIZE:
 
         raise RuntimeError(
-            f"{path.name} is too large for Telegram."
+            "File is larger than Telegram's upload limit."
         )
-
-    file_type = get_file_type(
-        path
-    )
-
-    logger.info(
-        "Uploading | %s | %s",
-        path.name,
-        file_type,
-    )
 
     # ========================================================
     # VIDEO
     # ========================================================
 
-    if file_type == "video":
+    if suffix in VIDEO_EXTENSIONS:
 
         await update.message.chat.send_action(
             ChatAction.UPLOAD_VIDEO
@@ -1504,8 +1398,11 @@ async def send_file(
 
             await update.message.reply_video(
                 video=file,
+
+                # Clean caption
+                caption="Downloaded Media",
+
                 supports_streaming=True,
-                caption=path.name[:100],
             )
 
         return
@@ -1514,7 +1411,7 @@ async def send_file(
     # AUDIO
     # ========================================================
 
-    if file_type == "audio":
+    if suffix in AUDIO_EXTENSIONS:
 
         await update.message.chat.send_action(
             ChatAction.UPLOAD_AUDIO
@@ -1527,7 +1424,9 @@ async def send_file(
 
             await update.message.reply_audio(
                 audio=file,
-                caption=path.name[:100],
+
+                # Clean caption
+                caption="Downloaded Media",
             )
 
         return
@@ -1536,7 +1435,7 @@ async def send_file(
     # IMAGE
     # ========================================================
 
-    if file_type == "image":
+    if suffix in IMAGE_EXTENSIONS:
 
         await update.message.chat.send_action(
             ChatAction.UPLOAD_PHOTO
@@ -1557,7 +1456,7 @@ async def send_file(
     # GIF
     # ========================================================
 
-    if file_type == "gif":
+    if suffix == ".gif":
 
         await update.message.chat.send_action(
             ChatAction.UPLOAD_DOCUMENT
@@ -1589,7 +1488,9 @@ async def send_file(
 
         await update.message.reply_document(
             document=file,
-            caption=path.name[:100],
+
+            # Clean caption
+            caption="Downloaded Media",
         )
 
 
@@ -1690,7 +1591,7 @@ def create_lightning_gif():
 
 
 # ============================================================
-# START COMMAND
+# /START
 # ============================================================
 
 async def start_command(
@@ -1701,10 +1602,10 @@ async def start_command(
     await update.message.reply_text(
         "👋 Welcome to Universal Media Downloader!\n\n"
 
-        "📥 Send me any supported media link.\n\n"
+        "📥 Send me any media link.\n\n"
 
         "⚡ I will download the available media "
-        "with its available audio.\n\n"
+        "and audio.\n\n"
 
         "🎵 Original audio is preserved whenever "
         "the source/container allows it."
@@ -1712,7 +1613,7 @@ async def start_command(
 
 
 # ============================================================
-# HELP COMMAND
+# /HELP
 # ============================================================
 
 async def help_command(
@@ -1723,9 +1624,10 @@ async def help_command(
     await update.message.reply_text(
         "📥 Universal Media Downloader\n\n"
 
-        "Send a media URL.\n\n"
+        "Send a media URL and I will process it.\n\n"
 
-        "Supported platforms include:\n"
+        "Supported platforms include:\n\n"
+
         "• Instagram\n"
         "• Facebook\n"
         "• YouTube\n"
@@ -1739,19 +1641,9 @@ async def help_command(
         "• Dailymotion\n"
         "• Twitch\n\n"
 
-        "Also supports direct:\n"
-        "• MP4\n"
-        "• MOV\n"
-        "• WebM\n"
-        "• MP3\n"
-        "• M4A\n"
-        "• WAV\n"
-        "• JPG\n"
-        "• PNG\n"
-        "• GIF\n"
-        "• WebP\n\n"
+        "Direct media URLs are also supported.\n\n"
 
-        "🎵 Original available audio is kept "
+        "🎵 Original available audio is preserved "
         "whenever possible."
     )
 
@@ -1794,7 +1686,7 @@ async def handle_message(
     )
 
     logger.info(
-        "Incoming URL | platform=%s | %s",
+        "URL received | %s | %s",
         platform,
         url,
     )
@@ -1820,16 +1712,17 @@ async def handle_message(
                 processing_message = (
                     await update.message.reply_animation(
                         animation=gif,
+
                         caption=(
                             "⚡ Thanks for providing the link!\n\n"
                             f"Platform: {platform.title()}\n"
-                            "Downloading media + available audio..."
+                            "Downloading media..."
                         ),
                     )
                 )
 
         # ====================================================
-        # DOWNLOAD IN WORKER
+        # DOWNLOAD
         # ====================================================
 
         loop = (
@@ -1852,7 +1745,7 @@ async def handle_message(
             )
 
         # ====================================================
-        # REMOVE PROCESSING MESSAGE
+        # DELETE PROCESSING MESSAGE
         # ====================================================
 
         if processing_message:
@@ -1867,7 +1760,7 @@ async def handle_message(
             processing_message = None
 
         # ====================================================
-        # SEND FILES
+        # SEND DOWNLOADED MEDIA
         # ====================================================
 
         sent_count = 0
@@ -1886,12 +1779,12 @@ async def handle_message(
             except Exception as error:
 
                 logger.error(
-                    "Upload failed: %s",
+                    "Upload error: %s",
                     error,
                 )
 
                 await update.message.reply_text(
-                    "❌ The media was downloaded, "
+                    "❌ Media was downloaded, "
                     "but Telegram could not upload it.\n\n"
                     f"Reason: {error}"
                 )
@@ -1899,7 +1792,7 @@ async def handle_message(
         if sent_count == 0:
 
             await update.message.reply_text(
-                "❌ No media could be sent to Telegram."
+                "❌ No media could be sent."
             )
 
     except Exception as error:
@@ -1932,7 +1825,7 @@ async def handle_message(
 
             f"🌐 Platform: {platform.title()}\n\n"
 
-            f"Technical reason:\n"
+            "Technical reason:\n"
             f"{error_text}\n\n"
 
             "Possible reasons:\n"
@@ -2006,6 +1899,7 @@ def main():
         .build()
     )
 
+    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -2013,6 +1907,7 @@ def main():
         )
     )
 
+    # /help
     application.add_handler(
         CommandHandler(
             "help",
@@ -2020,6 +1915,7 @@ def main():
         )
     )
 
+    # URLs sent as normal messages
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -2028,17 +1924,19 @@ def main():
         )
     )
 
+    # Error handler
     application.add_error_handler(
         telegram_error_handler
     )
 
+    # Start bot
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
 
 # ============================================================
-# RUN
+# START PROGRAM
 # ============================================================
 
 if __name__ == "__main__":
