@@ -1,1594 +1,312 @@
 import os
 import re
 import asyncio
-import logging
+import base64
 import tempfile
 import subprocess
-import base64
 from pathlib import Path
 
 import yt_dlp
-
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-
-logger = logging.getLogger(__name__)
-
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+COOKIE_B64 = os.getenv("INSTAGRAM_COOKIES_B64")
+MAX_SIZE = 45 * 1024 * 1024
+MAX_DIM = 720
 
-MAX_FILE_SIZE = 45 * 1024 * 1024
-MAX_HEIGHT = 720
+HOSTS = ("youtube.com", "youtu.be", "instagram.com", "tiktok.com", "facebook.com", "fb.watch")
+EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".flv", ".ts"}
 
-# Railway environment variable.
-#
-# Store the Base64 encoded contents of your Instagram
-# Netscape cookies.txt file here.
-INSTAGRAM_COOKIES_B64 = os.getenv(
-    "INSTAGRAM_COOKIES_B64"
-)
-
-# Optional direct cookie file path.
-INSTAGRAM_COOKIE_FILE = os.getenv(
-    "INSTAGRAM_COOKIE_FILE",
-    "cookies.txt",
-)
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
 
 
-# ============================================================
-# SUPPORTED HOSTS
-# ============================================================
-
-SUPPORTED_HOSTS = (
-    "youtube.com",
-    "youtu.be",
-    "instagram.com",
-    "tiktok.com",
-    "facebook.com",
-    "fb.watch",
-)
+def get_url(text):
+    m = re.search(r"https?://[^\s]+", text or "", re.I)
+    return m.group(0).rstrip(").,]}>'\"") if m else None
 
 
-# ============================================================
-# VIDEO EXTENSIONS
-# ============================================================
-
-VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".m4v",
-    ".mov",
-    ".webm",
-    ".mkv",
-    ".avi",
-    ".flv",
-    ".ts",
-}
+def supported(url):
+    return any(x in url.lower() for x in HOSTS)
 
 
-# ============================================================
-# USER AGENT
-# ============================================================
-
-USER_AGENT = (
-    "Mozilla/5.0 "
-    "(Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 "
-    "(KHTML, like Gecko) "
-    "Chrome/140.0.0.0 "
-    "Safari/537.36"
-)
-
-
-# ============================================================
-# URL HELPERS
-# ============================================================
-
-def is_supported_url(url: str) -> bool:
-
-    url_lower = url.lower()
-
-    return any(
-        host in url_lower
-        for host in SUPPORTED_HOSTS
-    )
-
-
-def extract_url(text: str) -> str | None:
-
-    match = re.search(
-        r"https?://[^\s]+",
-        text.strip(),
-        re.IGNORECASE,
-    )
-
-    if not match:
-        return None
-
-    url = match.group(0)
-
-    return url.rstrip(
-        ").,]}>'\""
-    )
-
-
-def is_instagram_url(url: str) -> bool:
-
+def instagram(url):
     return "instagram.com" in url.lower()
 
 
-# ============================================================
-# CREATE INSTAGRAM COOKIE FILE
-# ============================================================
+def cookies(temp):
+    if COOKIE_B64:
+        try:
+            p = Path(temp) / "cookies.txt"
+            p.write_bytes(base64.b64decode(COOKIE_B64, validate=True))
+            if p.stat().st_size:
+                return str(p)
+        except Exception:
+            pass
+    p = Path("cookies.txt")
+    return str(p) if p.exists() and p.stat().st_size else None
 
-def prepare_instagram_cookies(
-    temp_dir: str,
-) -> Path | None:
-    """
-    Create a temporary Instagram cookies.txt file.
 
-    Priority:
-
-    1. INSTAGRAM_COOKIES_B64
-    2. local cookies.txt
-    """
-
+def ffmpeg():
     try:
-
-        # ----------------------------------------------------
-        # Railway environment variable
-        # ----------------------------------------------------
-
-        if INSTAGRAM_COOKIES_B64:
-
-            cookie_file = (
-                Path(temp_dir)
-                / "instagram_cookies.txt"
-            )
-
-            try:
-
-                decoded = base64.b64decode(
-                    INSTAGRAM_COOKIES_B64
-                )
-
-                cookie_file.write_bytes(
-                    decoded
-                )
-
-                if cookie_file.stat().st_size > 0:
-
-                    logger.info(
-                        "Instagram cookies loaded "
-                        "from environment variable."
-                    )
-
-                    return cookie_file
-
-            except Exception:
-
-                logger.exception(
-                    "Could not decode "
-                    "INSTAGRAM_COOKIES_B64."
-                )
-
-        # ----------------------------------------------------
-        # Local cookies.txt
-        # ----------------------------------------------------
-
-        local_cookie_file = Path(
-            INSTAGRAM_COOKIE_FILE
-        )
-
-        if local_cookie_file.exists():
-
-            if local_cookie_file.stat().st_size > 0:
-
-                logger.info(
-                    "Instagram cookies.txt found."
-                )
-
-                return local_cookie_file
-
+        return "ffmpeg" if subprocess.run(
+            ["ffmpeg", "-version"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=10
+        ).returncode == 0 else None
     except Exception:
-
-        logger.exception(
-            "Instagram cookie preparation failed."
-        )
-
-    return None
-
-
-# ============================================================
-# FIND VIDEO
-# ============================================================
-
-def find_downloaded_video(
-    temp_dir: str,
-) -> Path | None:
-
-    directory = Path(temp_dir)
-
-    if not directory.exists():
         return None
 
-    video_files = []
 
-    for file in directory.iterdir():
+def media_info(src):
+    result = {"video": False, "audio": False, "w": 0, "h": 0, "codec": ""}
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams",
+             "-of", "default=noprint_wrappers=1", str(src)],
+            capture_output=True, text=True, timeout=30
+        )
+        stream = {}
+        for line in r.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                stream[k] = v
 
-        if not file.is_file():
-            continue
+        # Use a second probe for reliable stream detection.
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height",
+             "-of", "default=noprint_wrappers=1", str(src)],
+            capture_output=True, text=True, timeout=30
+        )
+        for line in r.stdout.splitlines():
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k == "codec_name":
+                result["codec"] = v
+            elif k == "width":
+                result["w"] = int(v)
+            elif k == "height":
+                result["h"] = int(v)
+        result["video"] = bool(r.stdout.strip())
 
-        if file.name.endswith(
-            (
-                ".part",
-                ".ytdl",
-                ".tmp",
-            )
-        ):
-            continue
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=30
+        )
+        result["audio"] = bool(r.stdout.strip())
+    except Exception:
+        pass
+    return result
 
-        if file.suffix.lower() not in VIDEO_EXTENSIONS:
-            continue
+
+def convert(src, temp):
+    exe = ffmpeg()
+    if not exe:
+        return None, "FFmpeg is not installed."
+
+    info = media_info(src)
+    if not info["video"]:
+        return None, "Downloaded file has no video stream."
+
+    out = Path(temp) / "final.mp4"
+
+    # Small H.264 MP4: remux without re-encoding.
+    if (src.suffix.lower() == ".mp4" and info["codec"] == "h264"
+            and info["w"] and info["h"] and max(info["w"], info["h"]) <= MAX_DIM):
+        cmd = [exe, "-y", "-i", str(src), "-map", "0:v:0", "-c:v", "copy"]
+        if info["audio"]:
+            cmd += ["-map", "0:a:0?", "-c:a", "copy"]
+        cmd += ["-movflags", "+faststart", str(out)]
+    else:
+        vf = "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease"
+        cmd = [
+            exe, "-y", "-i", str(src),
+            "-map", "0:v:0", "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "26", "-pix_fmt", "yuv420p", "-r", "30"
+        ]
+        if info["audio"]:
+            cmd += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2"]
+        cmd += ["-movflags", "+faststart", str(out)]
+
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode or not out.exists() or out.stat().st_size == 0:
+            return None, "FFmpeg failed:\n" + r.stderr[-2500:]
+        return out, None
+    except subprocess.TimeoutExpired:
+        return None, "FFmpeg conversion timed out."
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def ydl_options(temp, cookie=None):
+    o = {
+        "outtmpl": str(Path(temp) / "video_%(id)s.%(ext)s"),
+        "format": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "max_filesize": MAX_SIZE,
+        "retries": 3,
+        "fragment_retries": 3,
+        "socket_timeout": 30,
+        "concurrent_fragment_downloads": 4,
+        "http_headers": {"User-Agent": UA},
+        "quiet": True,
+    }
+    if cookie:
+        o["cookiefile"] = cookie
+    if "instagram.com" in (o.get("http_headers", {}).get("Referer", "")):
+        pass
+    return o
+
+
+def find_video(temp):
+    files = [p for p in Path(temp).iterdir()
+             if p.is_file() and p.suffix.lower() in EXTS and p.stat().st_size > 0]
+    return max(files, key=lambda p: p.stat().st_size) if files else None
+
+
+def download(url, temp):
+    attempts = []
+    opts = ydl_options(temp)
+
+    if instagram(url):
+        opts["http_headers"].update({
+            "Referer": "https://www.instagram.com/",
+            "Origin": "https://www.instagram.com/"
+        })
+
+    for cookie in ([None, cookies(temp)] if instagram(url) else [None]):
+        # Clean old downloads so another attempt cannot select the wrong file.
+        for p in Path(temp).iterdir():
+            if p.is_file() and p.suffix.lower() in EXTS:
+                try: p.unlink()
+                except OSError: pass
+
+        if cookie:
+            opts["cookiefile"] = cookie
+        else:
+            opts.pop("cookiefile", None)
 
         try:
-
-            if file.stat().st_size > 0:
-
-                video_files.append(file)
-
-        except OSError:
-
-            continue
-
-    if not video_files:
-        return None
-
-    mp4_files = [
-        file
-        for file in video_files
-        if file.suffix.lower() == ".mp4"
-    ]
-
-    if mp4_files:
-
-        return max(
-            mp4_files,
-            key=lambda file: file.stat().st_size,
-        )
-
-    return max(
-        video_files,
-        key=lambda file: file.stat().st_size,
-    )
-
-
-# ============================================================
-# FIND FFMPEG
-# ============================================================
-
-def find_ffmpeg() -> str | None:
-
-    try:
-
-        result = subprocess.run(
-            ["ffmpeg", "-version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode == 0:
-
-            return "ffmpeg"
-
-    except Exception:
-
-        pass
-
-    return None
-
-
-# ============================================================
-# CONVERT VIDEO
-# ============================================================
-
-def convert_to_mp4(
-    input_file: Path,
-    temp_dir: str,
-) -> tuple[Path | None, str | None]:
-
-    output_file = (
-        Path(temp_dir) / "final_video.mp4"
-    )
-
-    ffmpeg = find_ffmpeg()
-
-    if not ffmpeg:
-        return (
-            None,
-            "FFmpeg is not installed."
-        )
-
-    # --------------------------------------------------------
-    # First inspect the source
-    # --------------------------------------------------------
-
-    probe_command = [
-        ffmpeg,
-        "-i",
-        str(input_file),
-    ]
-
-    try:
-
-        probe = subprocess.run(
-            probe_command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
-        )
-
-        probe_text = probe.stderr
-
-    except Exception as error:
-
-        return (
-            None,
-            f"Could not inspect video: {error}"
-        )
-
-    # --------------------------------------------------------
-    # Detect audio
-    # --------------------------------------------------------
-
-    has_audio = (
-        "Audio:" in probe_text
-    )
-
-    logger.info(
-        "Input has audio: %s",
-        has_audio,
-    )
-
-    # --------------------------------------------------------
-    # Common video settings
-    #
-    # Keep maximum dimension at 720.
-    #
-    # Portrait:
-    # 1440x2560 -> 405x720
-    #
-    # Landscape:
-    # 2560x1440 -> 720x405
-    #
-    # Square:
-    # 1440x1440 -> 720x720
-    # --------------------------------------------------------
-
-    video_filter = (
-        "scale="
-        "w='min(720,iw)':"
-        "h='min(720,ih)':"
-        "force_original_aspect_ratio=decrease,"
-        "pad="
-        "ceil(iw/2)*2:"
-        "ceil(ih/2)*2:"
-        "(ow-iw)/2:"
-        "(oh-ih)/2"
-    )
-
-    # --------------------------------------------------------
-    # Base command
-    # --------------------------------------------------------
-
-    command = [
-        ffmpeg,
-
-        "-y",
-
-        "-i",
-        str(input_file),
-
-        # Video
-        "-map",
-        "0:v:0",
-
-        "-vf",
-        video_filter,
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        "26",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        # Limit extreme Instagram 60fps sources
-        "-r",
-        "30",
-    ]
-
-    # --------------------------------------------------------
-    # Audio
-    # --------------------------------------------------------
-
-    if has_audio:
-
-        command += [
-
-            "-map",
-            "0:a:0?",
-
-            "-c:a",
-            "aac",
-
-            "-b:a",
-            "96k",
-
-            "-ar",
-            "44100",
-
-            "-ac",
-            "2",
-        ]
-
-    else:
-
-        # No audio stream.
-        # Do NOT add audio encoding options.
-        logger.info(
-            "No audio stream detected. "
-            "Creating video-only MP4."
-        )
-
-    # --------------------------------------------------------
-    # MP4 compatibility
-    # --------------------------------------------------------
-
-    command += [
-
-        "-movflags",
-        "+faststart",
-
-        str(output_file),
-    ]
-
-    logger.info(
-        "Starting FFmpeg conversion..."
-    )
-
-    logger.info(
-        "FFmpeg command: %s",
-        " ".join(command),
-    )
-
-    try:
-
-        result = subprocess.run(
-            command,
-
-            stdout=subprocess.PIPE,
-
-            stderr=subprocess.PIPE,
-
-            text=True,
-
-            timeout=300,
-        )
-
-        # ----------------------------------------------------
-        # Failure
-        # ----------------------------------------------------
-
-        if result.returncode != 0:
-
-            logger.error(
-                "FFmpeg failed with code %s",
-                result.returncode,
-            )
-
-            logger.error(
-                "FFmpeg stderr:\n%s",
-                result.stderr[-10000:],
-            )
-
-            return (
-                None,
-                "FFmpeg conversion failed.\n\n"
-                + result.stderr[-5000:],
-            )
-
-        # ----------------------------------------------------
-        # Verify output
-        # ----------------------------------------------------
-
-        if not output_file.exists():
-
-            return (
-                None,
-                "FFmpeg finished but "
-                "did not create the MP4."
-            )
-
-        output_size = (
-            output_file.stat().st_size
-        )
-
-        if output_size <= 0:
-
-            return (
-                None,
-                "FFmpeg created an empty MP4."
-            )
-
-        logger.info(
-            "FFmpeg conversion successful."
-        )
-
-        logger.info(
-            "Output size: %.2f MB",
-            output_size / 1024 / 1024,
-        )
-
-        return (
-            output_file,
-            None,
-        )
-
-    except subprocess.TimeoutExpired:
-
-        logger.error(
-            "FFmpeg timed out."
-        )
-
-        return (
-            None,
-            "FFmpeg conversion timed out."
-        )
-
-    except Exception as error:
-
-        logger.exception(
-            "FFmpeg exception."
-        )
-
-        return (
-            None,
-            f"{type(error).__name__}: {error}"
-        )
-
-# ============================================================
-# BASE YT-DLP OPTIONS
-# ============================================================
-
-def get_base_ydl_options(
-    temp_dir: str,
-) -> dict:
-
-    output_template = str(
-        Path(temp_dir)
-        / "download_%(id)s_%(autonumber)s.%(ext)s"
-    )
-
-    return {
-
-        "outtmpl": output_template,
-
-        # ----------------------------------------------------
-        # Video selection
-        # ----------------------------------------------------
-
-        "format": (
-            f"bestvideo[height<={MAX_HEIGHT}]"
-            f"+bestaudio/"
-            f"best[height<={MAX_HEIGHT}]/"
-            f"best"
-        ),
-
-        "merge_output_format": "mp4",
-
-        # ----------------------------------------------------
-        # Download behavior
-        # ----------------------------------------------------
-
-        "noplaylist": True,
-
-        "restrictfilenames": True,
-
-        "writethumbnail": False,
-
-        "writeinfojson": False,
-
-        "writesubtitles": False,
-
-        "writeautomaticsub": False,
-
-        # ----------------------------------------------------
-        # Network
-        # ----------------------------------------------------
-
-        "retries": 5,
-
-        "fragment_retries": 5,
-
-        "file_access_retries": 5,
-
-        "socket_timeout": 30,
-
-        "continuedl": True,
-
-        "overwrites": True,
-
-        "concurrent_fragment_downloads": 4,
-
-        # ----------------------------------------------------
-        # Do not download gigantic source files
-        # ----------------------------------------------------
-
-        "max_filesize": MAX_FILE_SIZE,
-
-        # ----------------------------------------------------
-        # Browser headers
-        # ----------------------------------------------------
-
-        "http_headers": {
-
-            "User-Agent": USER_AGENT,
-
-            "Accept": (
-                "text/html,"
-                "application/xhtml+xml,"
-                "application/xml;q=0.9,"
-                "image/avif,"
-                "image/webp,"
-                "image/apng,"
-                "*/*;q=0.8"
-            ),
-
-            "Accept-Language":
-                "en-US,en;q=0.9",
-
-            "Sec-Fetch-Dest":
-                "document",
-
-            "Sec-Fetch-Mode":
-                "navigate",
-
-            "Sec-Fetch-Site":
-                "none",
-
-            "Upgrade-Insecure-Requests":
-                "1",
-        },
-
-        # ----------------------------------------------------
-        # Avoid unnecessary output
-        # ----------------------------------------------------
-
-        "quiet": True,
-
-        "no_warnings": False,
-    }
-
-
-# ============================================================
-# INSTAGRAM OPTIONS
-# ============================================================
-
-def get_instagram_options(
-    temp_dir: str,
-    use_cookies: bool,
-) -> dict:
-
-    options = get_base_ydl_options(
-        temp_dir
-    )
-
-    # Instagram-specific browser headers.
-    options["http_headers"].update({
-
-        "Referer":
-            "https://www.instagram.com/",
-
-        "Origin":
-            "https://www.instagram.com/",
-    })
-
-    # --------------------------------------------------------
-    # Cookies
-    # --------------------------------------------------------
-
-    if use_cookies:
-
-        cookie_file = (
-            prepare_instagram_cookies(
-                temp_dir
-            )
-        )
-
-        if cookie_file:
-
-            options["cookiefile"] = (
-                str(cookie_file)
-            )
-
-            logger.info(
-                "Instagram authentication "
-                "cookies enabled."
-            )
-
-        else:
-
-            logger.warning(
-                "Instagram cookies requested "
-                "but no cookies were found."
-            )
-
-    return options
-
-
-# ============================================================
-# GENERIC OPTIONS
-# ============================================================
-
-def get_generic_options(
-    temp_dir: str,
-) -> dict:
-
-    return get_base_ydl_options(
-        temp_dir
-    )
-
-
-# ============================================================
-# CLASSIFY ERROR
-# ============================================================
-
-def classify_download_error(
-    error_text: str,
-    instagram: bool,
-) -> str:
-
-    text = error_text.lower()
-
-    # --------------------------------------------------------
-    # Instagram login
-    # --------------------------------------------------------
-
-    if instagram and any(
-        phrase in text
-        for phrase in (
-            "login required",
-            "login",
-            "authentication",
-            "cookies",
-            "sign in",
-        )
-    ):
-
-        return (
-            "Instagram requires login/authentication "
-            "for this post. Add a fresh Instagram "
-            "cookies.txt file to Railway."
-        )
-
-    # --------------------------------------------------------
-    # No formats
-    # --------------------------------------------------------
-
-    if "no video formats found" in text:
-
-        return (
-            "Instagram did not provide a downloadable "
-            "video format.\n\n"
-            "This can happen when the post is image-only, "
-            "restricted, unavailable, or Instagram has "
-            "changed the data returned to yt-dlp."
-        )
-
-    # --------------------------------------------------------
-    # Private
-    # --------------------------------------------------------
-
-    if "private" in text:
-
-        return (
-            "This video appears to be private. "
-            "Use Instagram cookies from an account "
-            "that can view the post."
-        )
-
-    # --------------------------------------------------------
-    # 403 / forbidden
-    # --------------------------------------------------------
-
-    if (
-        "403" in text
-        or "forbidden" in text
-        or "access denied" in text
-    ):
-
-        return (
-            "Instagram/platform access was denied. "
-            "Fresh authentication cookies may be required."
-        )
-
-    # --------------------------------------------------------
-    # 404
-    # --------------------------------------------------------
-
-    if "404" in text:
-
-        return (
-            "The Instagram post could not be found. "
-            "It may have been deleted, changed to private, "
-            "or is no longer available."
-        )
-
-    # --------------------------------------------------------
-    # Rate limit
-    # --------------------------------------------------------
-
-    if any(
-        phrase in text
-        for phrase in (
-            "rate limit",
-            "too many requests",
-            "429",
-        )
-    ):
-
-        return (
-            "The platform is rate-limiting the bot. "
-            "Please wait and try again later."
-        )
-
-    # --------------------------------------------------------
-    # Generic
-    # --------------------------------------------------------
-
-    return error_text[:2500]
-
-
-# ============================================================
-# ONE DOWNLOAD ATTEMPT
-# ============================================================
-
-def perform_yt_dlp_download(
-    url: str,
-    temp_dir: str,
-    options: dict,
-) -> tuple[Path | None, str | None]:
-
-    try:
-
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True,
-            )
-
-            if not info:
-
-                return (
-                    None,
-                    "yt-dlp returned no information."
-                )
-
-        video = find_downloaded_video(
-            temp_dir
-        )
-
-        if not video:
-
-            return (
-                None,
-                "No video file was created."
-            )
-
-        return (
-            video,
-            None,
-        )
-
-    except yt_dlp.utils.DownloadError as error:
-
-        logger.error(
-            "yt-dlp DownloadError: %s",
-            error,
-        )
-
-        return (
-            None,
-            str(error),
-        )
-
-    except Exception as error:
-
-        logger.exception(
-            "yt-dlp unexpected error."
-        )
-
-        return (
-            None,
-            f"{type(error).__name__}: {error}",
-        )
-
-
-# ============================================================
-# DOWNLOAD VIDEO
-# ============================================================
-
-def download_video(
-    url: str,
-    temp_dir: str,
-) -> tuple[Path | None, str | None]:
-
-    instagram = is_instagram_url(
-        url
-    )
-
-    errors = []
-
-    # ========================================================
-    # INSTAGRAM
-    # ========================================================
-
-    if instagram:
-
-        # ----------------------------------------------------
-        # ATTEMPT 1
-        # Public access
-        # ----------------------------------------------------
-
-        logger.info(
-            "Instagram attempt 1: public extraction."
-        )
-
-        options = get_instagram_options(
-            temp_dir,
-            use_cookies=False,
-        )
-
-        video, error = (
-            perform_yt_dlp_download(
-                url,
-                temp_dir,
-                options,
-            )
-        )
-
-        if video:
-
-            return finalize_video(
-                video,
-                temp_dir,
-            )
-
-        if error:
-
-            errors.append(
-                "Public extraction:\n"
-                + error
-            )
-
-        # ----------------------------------------------------
-        # ATTEMPT 2
-        # Authenticated cookies
-        # ----------------------------------------------------
-
-        cookie_file = (
-            prepare_instagram_cookies(
-                temp_dir
-            )
-        )
-
-        if cookie_file:
-
-            logger.info(
-                "Instagram attempt 2: "
-                "authenticated extraction."
-            )
-
-            options = get_instagram_options(
-                temp_dir,
-                use_cookies=True,
-            )
-
-            video, error = (
-                perform_yt_dlp_download(
-                    url,
-                    temp_dir,
-                    options,
-                )
-            )
-
-            if video:
-
-                return finalize_video(
-                    video,
-                    temp_dir,
-                )
-
-            if error:
-
-                errors.append(
-                    "Authenticated extraction:\n"
-                    + error
-                )
-
-        # ----------------------------------------------------
-        # Final Instagram error
-        # ----------------------------------------------------
-
-        combined_error = "\n\n".join(
-            errors
-        )
-
-        return (
-            None,
-            classify_download_error(
-                combined_error,
-                True,
-            ),
-        )
-
-    # ========================================================
-    # OTHER PLATFORMS
-    # ========================================================
-
-    logger.info(
-        "Generic yt-dlp extraction."
-    )
-
-    options = get_generic_options(
-        temp_dir
-    )
-
-    video, error = (
-        perform_yt_dlp_download(
-            url,
-            temp_dir,
-            options,
-        )
-    )
-
-    if not video:
-
-        return (
-            None,
-            classify_download_error(
-                error
-                or "Unknown download error.",
-                False,
-            ),
-        )
-
-    return finalize_video(
-        video,
-        temp_dir,
-    )
-
-
-# ============================================================
-# FINALIZE VIDEO
-# ============================================================
-
-def finalize_video(
-    downloaded_file: Path,
-    temp_dir: str,
-) -> tuple[Path | None, str | None]:
-
-    logger.info(
-        "Downloaded file: %s",
-        downloaded_file,
-    )
-
-    try:
-
-        source_size = (
-            downloaded_file.stat().st_size
-        )
-
-        if source_size <= 0:
-
-            return (
-                None,
-                "Downloaded video is empty."
-            )
-
-    except OSError:
-
-        return (
-            None,
-            "Could not read downloaded video."
-        )
-
-    # --------------------------------------------------------
-    # Convert to MP4
-    # --------------------------------------------------------
-
-    final_file, error = (
-        convert_to_mp4(
-            downloaded_file,
-            temp_dir,
-        )
-    )
-
-    if not final_file:
-
-        return (
-            None,
-            error
-            or "Video conversion failed."
-        )
-
-    # --------------------------------------------------------
-    # Final size
-    # --------------------------------------------------------
-
-    try:
-
-        final_size = (
-            final_file.stat().st_size
-        )
-
-    except OSError:
-
-        return (
-            None,
-            "Could not read final MP4."
-        )
-
-    if final_size <= 0:
-
-        return (
-            None,
-            "Final MP4 is empty."
-        )
-
-    if final_size > MAX_FILE_SIZE:
-
-        return (
-            None,
-            (
-                "Final video is too large.\n"
-                f"Size: "
-                f"{final_size / 1024 / 1024:.1f} MB\n"
-                f"Maximum: "
-                f"{MAX_FILE_SIZE / 1024 / 1024:.0f} MB"
-            ),
-        )
-
-    logger.info(
-        "Final MP4: %.2f MB",
-        final_size / 1024 / 1024,
-    )
-
-    return (
-        final_file,
-        None,
-    )
-
-
-# ============================================================
-# /START
-# ============================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
-
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+            src = find_video(temp)
+            if src:
+                return convert(src, temp)
+            attempts.append("No video file was created.")
+        except Exception as e:
+            attempts.append(str(e))
+
+        if not instagram(url):
+            break
+
+    error = "\n\n".join(attempts)
+    low = error.lower()
+
+    if "no video formats found" in low:
+        error = "No downloadable video format was provided by the platform."
+    elif any(x in low for x in ("login required", "authentication", "sign in", "cookies")):
+        error = "Authentication is required. Your Instagram cookies may be expired."
+    elif "private" in low:
+        error = "This video is private or your account cannot access it."
+    elif "429" in low or "rate limit" in low:
+        error = "The platform is rate-limiting the bot. Try again later."
+    elif "403" in low or "forbidden" in low:
+        error = "Access was denied by the platform."
+
+    return None, error[:3500]
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Social Video Downloader!\n\n"
-
-        "📥 Send me a video URL.\n\n"
-
-        "Supported platforms:\n"
-        "📸 Instagram\n"
-        "▶️ YouTube\n"
-        "🎬 YouTube Shorts\n"
-        "🎵 TikTok\n"
-        "📘 Facebook\n\n"
-
-        "🎬 Videos are converted to "
-        "iPhone-compatible MP4.\n\n"
-
-        "⚠️ Private/restricted videos may "
-        "require authentication cookies."
+        "👋 Social Video Downloader\n\n"
+        "Send an Instagram, YouTube, Shorts, TikTok or Facebook video URL.\n\n"
+        "🎬 Output: H.264 MP4 • Max 720p • Max 45 MB"
     )
 
 
-# ============================================================
-# /HELP
-# ============================================================
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
 
-    if not update.message:
+async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
         return
 
-    await update.message.reply_text(
-        "📥 Send a video URL from:\n\n"
-
-        "• Instagram\n"
-        "• YouTube\n"
-        "• YouTube Shorts\n"
-        "• TikTok\n"
-        "• Facebook\n\n"
-
-        "The bot downloads the video, "
-        "converts it to MP4 and sends it "
-        "back to you.\n\n"
-
-        "Maximum size: 45 MB."
-    )
-
-
-# ============================================================
-# DOWNLOAD HANDLER
-# ============================================================
-
-async def download_video_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    if not update.message:
-        return
-
-    if not update.message.text:
-        return
-
-    # --------------------------------------------------------
-    # Extract URL
-    # --------------------------------------------------------
-
-    url = extract_url(
-        update.message.text
-    )
-
+    url = get_url(update.message.text)
     if not url:
-
-        await update.message.reply_text(
-            "❌ Please send a valid video URL."
-        )
-
+        await update.message.reply_text("❌ Please send a valid video URL.")
         return
 
-    # --------------------------------------------------------
-    # Supported URL
-    # --------------------------------------------------------
-
-    if not is_supported_url(url):
-
-        await update.message.reply_text(
-            "❌ Unsupported URL.\n\n"
-
-            "Supported platforms:\n"
-            "📸 Instagram\n"
-            "▶️ YouTube\n"
-            "🎬 YouTube Shorts\n"
-            "🎵 TikTok\n"
-            "📘 Facebook"
-        )
-
+    if not supported(url):
+        await update.message.reply_text("❌ Unsupported platform.")
         return
 
-    # --------------------------------------------------------
-    # Status
-    # --------------------------------------------------------
-
-    status = await update.message.reply_text(
-        "⏳ Downloading video...\n\n"
-        "Please wait."
-    )
-
+    status = await update.message.reply_text("⏳ Downloading video...")
     try:
-
         await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id,
-            action=ChatAction.UPLOAD_VIDEO,
+            update.effective_chat.id, ChatAction.UPLOAD_VIDEO
         )
 
-        # ----------------------------------------------------
-        # Temporary directory
-        # ----------------------------------------------------
+        with tempfile.TemporaryDirectory(prefix="video_") as temp:
+            video, error = await asyncio.to_thread(download, url, temp)
 
-        with tempfile.TemporaryDirectory(
-            prefix="social_video_"
-        ) as temp_dir:
-
-            # ------------------------------------------------
-            # Download
-            # ------------------------------------------------
-
-            downloaded_file, error = (
-                await asyncio.to_thread(
-                    download_video,
-                    url,
-                    temp_dir,
-                )
-            )
-
-            # ------------------------------------------------
-            # Failure
-            # ------------------------------------------------
-
-            if not downloaded_file:
-
-                error_text = (
-                    error
-                    or "Unknown download error."
-                )
-
-                await status.edit_text(
-                    "❌ I couldn't download this video.\n\n"
-                    "Technical reason:\n"
-                    f"{error_text[:3000]}"
-                )
-
+            if not video:
+                await status.edit_text("❌ Download failed.\n\n" + (error or "Unknown error."))
                 return
 
-            # ------------------------------------------------
-            # Size check
-            # ------------------------------------------------
-
-            file_size = (
-                downloaded_file.stat().st_size
-            )
-
-            file_size_mb = (
-                file_size / 1024 / 1024
-            )
-
-            if file_size > MAX_FILE_SIZE:
-
-                await status.edit_text(
-                    "❌ Video is too large.\n\n"
-                    f"Size: {file_size_mb:.1f} MB\n"
-                    "Maximum: 45 MB"
-                )
-
+            if video.stat().st_size > MAX_SIZE:
+                await status.edit_text("❌ Final video is larger than 45 MB.")
                 return
 
-            # ------------------------------------------------
-            # Sending
-            # ------------------------------------------------
-
-            await status.edit_text(
-                "📤 Video ready!\n\n"
-                "Sending to Telegram..."
-            )
+            await status.edit_text("📤 Sending video...")
+            with video.open("rb") as f:
+                await update.message.reply_video(
+                    video=f,
+                    caption="✅ Downloaded • MP4 • H.264",
+                    supports_streaming=True,
+                    read_timeout=180,
+                    write_timeout=180,
+                    connect_timeout=30,
+                    pool_timeout=30,
+                )
 
             try:
-
-                with downloaded_file.open(
-                    "rb"
-                ) as video_file:
-
-                    await update.message.reply_video(
-
-                        video=video_file,
-
-                        caption=(
-                            "✅ Downloaded successfully\n"
-                            "🎬 MP4 • H.264 • AAC"
-                        ),
-
-                        supports_streaming=True,
-
-                        read_timeout=180,
-
-                        write_timeout=180,
-
-                        connect_timeout=30,
-
-                        pool_timeout=30,
-                    )
-
-            except Exception as upload_error:
-
-                logger.exception(
-                    "Telegram upload failed."
-                )
-
-                await status.edit_text(
-                    "❌ Video was downloaded, "
-                    "but Telegram could not send it.\n\n"
-                    f"{type(upload_error).__name__}: "
-                    f"{upload_error}"
-                )
-
-                return
-
-            # ------------------------------------------------
-            # Delete status
-            # ------------------------------------------------
-
-            try:
-
                 await status.delete()
-
             except Exception:
-
                 pass
 
-    except Exception as error:
-
-        logger.exception(
-            "Handler error."
-        )
-
-        try:
-
-            await status.edit_text(
-                "❌ Something went wrong.\n\n"
-                f"{type(error).__name__}: "
-                f"{error}"
-            )
-
-        except Exception:
-
-            pass
+    except Exception as e:
+        await status.edit_text(f"❌ Error: {type(e).__name__}: {e}")
 
 
-# ============================================================
-# ERROR HANDLER
-# ============================================================
+async def error_handler(update, context):
+    print("Bot error:", context.error)
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    logger.error(
-        "Telegram bot error: %s",
-        context.error,
-        exc_info=context.error,
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
-
     if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is missing in Railway Variables.")
 
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is missing.\n"
-            "Add BOT_TOKEN in Railway Variables."
-        )
+    if not ffmpeg():
+        print("WARNING: FFmpeg not found.")
 
-    logger.info(
-        "Starting Social Video Downloader Bot..."
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+    app.add_error_handler(error_handler)
 
-    logger.info(
-        "yt-dlp version: %s",
-        yt_dlp.version.__version__,
-    )
+    print("🤖 Bot is running...", flush=True)
+    app.run_polling(drop_pending_updates=True)
 
-    logger.info(
-        "FFmpeg available: %s",
-        bool(find_ffmpeg()),
-    )
-
-    logger.info(
-        "Instagram cookies configured: %s",
-        bool(INSTAGRAM_COOKIES_B64)
-        or Path(INSTAGRAM_COOKIE_FILE).exists(),
-    )
-
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-
-    # --------------------------------------------------------
-    # Commands
-    # --------------------------------------------------------
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
-    )
-
-    # --------------------------------------------------------
-    # URLs
-    # --------------------------------------------------------
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            download_video_handler,
-        )
-    )
-
-    # --------------------------------------------------------
-    # Error handler
-    # --------------------------------------------------------
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    # --------------------------------------------------------
-    # Start
-    # --------------------------------------------------------
-
-    print(
-        "🤖 Social Video Downloader Bot is running...",
-        flush=True,
-    )
-
-    print(
-        "Supported: Instagram, YouTube, "
-        "YouTube Shorts, TikTok, Facebook",
-        flush=True,
-    )
-
-    application.run_polling(
-        drop_pending_updates=True,
-    )
-
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
     main()
