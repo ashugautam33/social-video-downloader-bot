@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import base64
 import asyncio
 import logging
@@ -32,17 +33,24 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Keep below the practical Telegram bot upload limit.
-# 45 MB gives us some safety margin.
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN environment variable is missing."
+    )
+
+# Practical Telegram upload limit
 MAX_FILE_SIZE = 45 * 1024 * 1024
 
-# Normal output resolution.
+# Maximum video height when conversion is necessary
 MAX_VIDEO_HEIGHT = 720
 
-# Maximum number of playlist entries.
+# Maximum playlist items
 MAX_PLAYLIST_ITEMS = 20
 
-# Temporary directory.
+# FFmpeg timeout
+FFMPEG_TIMEOUT = 90
+
+# Temporary working directory
 BASE_DIR = (
     Path(tempfile.gettempdir())
     / "universal_media_downloader"
@@ -50,12 +58,8 @@ BASE_DIR = (
 
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 COOKIE_DIR = BASE_DIR / "cookies"
+LIGHTNING_GIF = BASE_DIR / "lightning.gif"
 
-LIGHTNING_GIF = (
-    BASE_DIR / "lightning.gif"
-)
-
-# Create required directories.
 BASE_DIR.mkdir(
     parents=True,
     exist_ok=True,
@@ -78,15 +82,23 @@ COOKIE_DIR.mkdir(
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
 logger = logging.getLogger(
-    "UniversalMediaDownloader"
+    "UniversalDownloader"
+)
+
+
+# ============================================================
+# USER AGENT
+# ============================================================
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/142.0.0.0 Safari/537.36"
 )
 
 
@@ -144,7 +156,7 @@ ALL_MEDIA_EXTENSIONS = (
 
 
 # ============================================================
-# PLATFORM COOKIE VARIABLES
+# COOKIE ENVIRONMENT VARIABLES
 # ============================================================
 
 COOKIE_ENV = {
@@ -164,31 +176,13 @@ COOKIE_ENV = {
 
 
 # ============================================================
-# USER AGENT
-# ============================================================
-
-USER_AGENT = (
-    "Mozilla/5.0 "
-    "(Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 "
-    "(KHTML, like Gecko) "
-    "Chrome/142.0.0.0 Safari/537.36"
-)
-
-
-# ============================================================
 # PLATFORM DETECTION
 # ============================================================
 
 def detect_platform(url: str) -> str:
 
     try:
-
-        host = (
-            urlparse(url)
-            .netloc
-            .lower()
-        )
+        host = urlparse(url).netloc.lower()
 
         if host.startswith("www."):
             host = host[4:]
@@ -266,9 +260,7 @@ def extract_url(text: str):
     if not text:
         return None
 
-    match = URL_PATTERN.search(
-        text
-    )
+    match = URL_PATTERN.search(text)
 
     if not match:
         return None
@@ -287,15 +279,11 @@ def extract_url(text: str):
 def normalize_url(url: str) -> str:
 
     try:
-
         parsed = urlparse(url)
 
-        host = (
-            parsed.netloc
-            .lower()
-        )
+        host = parsed.netloc.lower()
 
-        # Handle Facebook login redirect URLs.
+        # Facebook login redirect
         if (
             "facebook.com" in host
             and parsed.path.startswith("/login")
@@ -305,8 +293,8 @@ def normalize_url(url: str) -> str:
                 parsed.query
             )
 
-            next_values = (
-                query.get("next")
+            next_values = query.get(
+                "next"
             )
 
             if next_values:
@@ -323,85 +311,81 @@ def normalize_url(url: str) -> str:
         return url
 
     except Exception:
-
         return url
 
 
 # ============================================================
-# DIRECT MEDIA CHECK
+# DIRECT MEDIA URL
 # ============================================================
 
-def is_direct_media_url(
-    url: str,
-) -> bool:
+def is_direct_media_url(url: str) -> bool:
 
     try:
 
-        path = (
-            urlparse(url)
-            .path
-            .lower()
-        )
+        path = urlparse(url).path.lower()
 
         return any(
-            path.endswith(ext)
-            for ext in ALL_MEDIA_EXTENSIONS
+            path.endswith(extension)
+            for extension in ALL_MEDIA_EXTENSIONS
         )
 
     except Exception:
-
         return False
 
 
 # ============================================================
-# COOKIE FILE CREATION
+# COOKIE FILE
 # ============================================================
 
-def create_cookie_file(
-    platform: str,
-):
+def create_cookie_file(platform: str):
 
-    environment_name = (
-        COOKIE_ENV.get(platform)
+    env_name = COOKIE_ENV.get(
+        platform
     )
 
-    if not environment_name:
+    if not env_name:
         return None
 
     encoded = os.getenv(
-        environment_name
+        env_name
     )
 
     if not encoded:
         return None
 
+    encoded = encoded.strip()
+
+    cookie_file = (
+        COOKIE_DIR
+        / f"{platform}.txt"
+    )
+
     try:
 
         decoded = base64.b64decode(
-            encoded.strip(),
+            encoded,
             validate=True,
         )
 
-        cookie_text = (
-            decoded.decode("utf-8")
+        text = decoded.decode(
+            "utf-8"
         )
 
     except Exception as error:
 
         logger.error(
-            "Cookie decode failed for %s: %s",
+            "Invalid cookies for %s: %s",
             platform,
             error,
         )
 
         return None
 
-    # Verify Netscape cookie format.
     if not (
-        cookie_text.startswith(
+        text.startswith(
             "# Netscape HTTP Cookie File"
         )
-        or cookie_text.startswith(
+        or text.startswith(
             "# HTTP Cookie File"
         )
     ):
@@ -413,16 +397,12 @@ def create_cookie_file(
 
         return None
 
-    cookie_file = (
-        COOKIE_DIR
-        / f"{platform}.txt"
-    )
-
     try:
 
         cookie_file.write_text(
-            cookie_text,
+            text,
             encoding="utf-8",
+            newline="\n",
         )
 
         return str(
@@ -443,9 +423,7 @@ def create_cookie_file(
 # SAFE FILENAME
 # ============================================================
 
-def safe_filename(
-    name: str,
-) -> str:
+def safe_filename(name: str) -> str:
 
     name = re.sub(
         r'[<>:"/\\|?*\x00-\x1F]',
@@ -458,497 +436,80 @@ def safe_filename(
     )
 
     if not name:
-
-        name = (
-            "Downloaded_Media"
-        )
+        name = "Downloaded_Media"
 
     return name[:180]
 
 
 # ============================================================
-# DIRECTORY CLEANUP
+# CONTENT TYPE
 # ============================================================
 
-def cleanup_directory(
-    path: Path,
+def extension_from_content_type(
+    content_type: str,
 ):
 
-    try:
+    content_type = (
+        content_type
+        .split(";")[0]
+        .strip()
+        .lower()
+    )
 
-        if path.exists():
+    mapping = {
 
-            shutil.rmtree(
-                path,
-                ignore_errors=True,
-            )
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "video/quicktime": ".mov",
+        "video/x-msvideo": ".avi",
 
-    except Exception as error:
+        "audio/mpeg": ".mp3",
+        "audio/mp4": ".m4a",
+        "audio/aac": ".aac",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/ogg": ".ogg",
+        "audio/flac": ".flac",
+        "audio/webm": ".weba",
 
-        logger.warning(
-            "Cleanup failed: %s",
-            error,
-        )
-
-
-# ============================================================
-# FIND MEDIA FILES
-# ============================================================
-
-def find_media_files(
-    directory: Path,
-):
-
-    files = []
-
-    if not directory.exists():
-        return files
-
-    ignored_extensions = {
-        ".part",
-        ".ytdl",
-        ".temp",
-        ".json",
-        ".description",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/svg+xml": ".svg",
     }
 
-    for path in directory.rglob("*"):
-
-        if not path.is_file():
-            continue
-
-        if (
-            path.suffix.lower()
-            in ignored_extensions
-        ):
-            continue
-
-        try:
-
-            if path.stat().st_size <= 0:
-                continue
-
-        except Exception:
-
-            continue
-
-        files.append(path)
-
-    return sorted(
-        files,
-        key=lambda item:
-            item.stat().st_mtime,
+    return mapping.get(
+        content_type,
+        ".bin",
     )
 
 
 # ============================================================
-# FFMPEG RUNNER
+# HTTP SESSION
 # ============================================================
 
-def run_ffmpeg(
-    command,
-):
+def create_http_session():
 
-    logger.info(
-        "FFmpeg: %s",
-        " ".join(
-            map(str, command)
-        ),
+    session = requests.Session()
+
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": (
+                "text/html,"
+                "application/xhtml+xml,"
+                "application/xml;q=0.9,"
+                "image/avif,"
+                "image/webp,"
+                "*/*;q=0.8"
+            ),
+            "Connection": "keep-alive",
+        }
     )
 
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        logger.error(
-            "FFmpeg error:\n%s",
-            result.stderr[-4000:],
-        )
-
-        raise RuntimeError(
-            "FFmpeg failed to process the media."
-        )
-
-    return result
-
-
-# ============================================================
-# VIDEO INFORMATION
-# ============================================================
-
-def get_video_info(
-    path: Path,
-):
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,codec_name",
-        "-of",
-        "default=noprint_wrappers=1",
-        str(path),
-    ]
-
-    try:
-
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        values = {}
-
-        for line in (
-            result.stdout.splitlines()
-        ):
-
-            if "=" not in line:
-                continue
-
-            key, value = line.split(
-                "=",
-                1,
-            )
-
-            values[key.strip()] = (
-                value.strip()
-            )
-
-        width = int(
-            values.get(
-                "width",
-                0,
-            )
-        )
-
-        height = int(
-            values.get(
-                "height",
-                0,
-            )
-        )
-
-        codec = values.get(
-            "codec_name"
-        )
-
-        return (
-            width,
-            height,
-            codec,
-        )
-
-    except Exception:
-
-        return (
-            0,
-            0,
-            None,
-        )
-
-
-# ============================================================
-# AUDIO INFORMATION
-# ============================================================
-
-def get_audio_codec(
-    path: Path,
-):
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=codec_name",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-
-    try:
-
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        codec = (
-            result.stdout.strip()
-        )
-
-        return codec or None
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# UNIVERSAL IPHONE VIDEO CONVERSION
-# ============================================================
-
-def convert_video_for_iphone(
-    input_path: Path,
-    output_path: Path,
-    height: int,
-    crf: int,
-    audio_bitrate: str,
-):
-
-    """
-    Create a highly compatible MP4.
-
-    Video:
-        H.264 / AVC
-
-    Audio:
-        AAC
-
-    Pixel format:
-        yuv420p
-
-    Container:
-        MP4
-
-    Metadata:
-        preserved where possible
-
-    Fast start:
-        enabled
-    """
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(input_path),
-
-        # ----------------------------------------------
-        # VIDEO
-        # ----------------------------------------------
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        str(crf),
-
-        # iPhone-compatible pixel format.
-        "-pix_fmt",
-        "yuv420p",
-
-        # Limit height while preserving aspect ratio.
-        "-vf",
-        f"scale=-2:{height}",
-
-        # ----------------------------------------------
-        # AUDIO
-        # ----------------------------------------------
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        audio_bitrate,
-
-        # ----------------------------------------------
-        # MP4
-        # ----------------------------------------------
-
-        "-movflags",
-        "+faststart",
-
-        # Preserve source metadata.
-        "-map_metadata",
-        "0",
-
-        str(output_path),
-    ]
-
-    run_ffmpeg(
-        command
-    )
-
-    if not output_path.exists():
-
-        raise RuntimeError(
-            "FFmpeg did not create the output video."
-        )
-
-    return output_path
-
-
-# ============================================================
-# PREPARE VIDEO
-# ============================================================
-
-def process_video_file(
-    path: Path,
-):
-
-    """
-    Every video is normalized.
-
-    We deliberately do NOT simply pass through
-    the original file because source websites can
-    provide codecs that Telegram/iOS may not handle
-    consistently.
-
-    First:
-        720p
-        H.264
-        AAC 192k
-        CRF 23
-
-    If that is too large:
-
-        480p
-        H.264
-        AAC 128k
-        CRF 30
-    """
-
-    first_output = (
-        path.parent
-        / "Downloaded_Media.mp4"
-    )
-
-    # --------------------------------------------------------
-    # First conversion
-    # --------------------------------------------------------
-
-    try:
-
-        convert_video_for_iphone(
-            input_path=path,
-            output_path=first_output,
-            height=720,
-            crf=23,
-            audio_bitrate="192k",
-        )
-
-        size = (
-            first_output.stat().st_size
-        )
-
-        logger.info(
-            "First converted video size: %.2f MB",
-            size / (1024 * 1024),
-        )
-
-        if size <= MAX_FILE_SIZE:
-
-            return first_output
-
-    except Exception as error:
-
-        logger.warning(
-            "First conversion failed: %s",
-            error,
-        )
-
-    # --------------------------------------------------------
-    # Second conversion
-    # --------------------------------------------------------
-
-    second_output = (
-        path.parent
-        / "Downloaded_Media_480p.mp4"
-    )
-
-    try:
-
-        convert_video_for_iphone(
-            input_path=path,
-            output_path=second_output,
-            height=480,
-            crf=30,
-            audio_bitrate="128k",
-        )
-
-        size = (
-            second_output.stat().st_size
-        )
-
-        logger.info(
-            "Second converted video size: %.2f MB",
-            size / (1024 * 1024),
-        )
-
-        if size <= MAX_FILE_SIZE:
-
-            return second_output
-
-    except Exception as error:
-
-        logger.warning(
-            "Second conversion failed: %s",
-            error,
-        )
-
-    # --------------------------------------------------------
-    # Third conversion
-    # --------------------------------------------------------
-
-    third_output = (
-        path.parent
-        / "Downloaded_Media_low.mp4"
-    )
-
-    try:
-
-        convert_video_for_iphone(
-            input_path=path,
-            output_path=third_output,
-            height=360,
-            crf=33,
-            audio_bitrate="96k",
-        )
-
-        size = (
-            third_output.stat().st_size
-        )
-
-        logger.info(
-            "Third converted video size: %.2f MB",
-            size / (1024 * 1024),
-        )
-
-        if size <= MAX_FILE_SIZE:
-
-            return third_output
-
-    except Exception as error:
-
-        logger.warning(
-            "Third conversion failed: %s",
-            error,
-        )
-
-    raise RuntimeError(
-        "The video could not be compressed below "
-        "the Telegram upload limit."
-    )
+    return session
 
 
 # ============================================================
@@ -960,89 +521,60 @@ def direct_download(
     output_dir: Path,
 ):
 
-    session = requests.Session()
-
-    session.headers.update(
-        {
-            "User-Agent": USER_AGENT,
-            "Accept": "*/*",
-        }
-    )
+    session = create_http_session()
 
     response = session.get(
         url,
         stream=True,
-        timeout=60,
+        timeout=(20, 120),
         allow_redirects=True,
     )
 
     response.raise_for_status()
 
-    content_type = (
-        response.headers.get(
-            "Content-Type",
-            "",
-        )
-        .lower()
+    content_type = response.headers.get(
+        "Content-Type",
+        "",
     )
 
-    # Determine extension.
-    extension = ".bin"
+    filename = Path(
+        urlparse(
+            response.url
+        ).path
+    ).name
 
-    if "video/mp4" in content_type:
+    filename = safe_filename(
+        filename
+    )
 
-        extension = ".mp4"
+    extension = Path(
+        filename
+    ).suffix.lower()
 
-    elif "video/webm" in content_type:
+    if not extension:
 
-        extension = ".webm"
+        extension = (
+            extension_from_content_type(
+                content_type
+            )
+        )
 
-    elif "video/quicktime" in content_type:
+        filename += extension
 
-        extension = ".mov"
-
-    elif "audio/mpeg" in content_type:
-
-        extension = ".mp3"
-
-    elif "audio/mp4" in content_type:
-
-        extension = ".m4a"
-
-    elif "audio/wav" in content_type:
-
-        extension = ".wav"
-
-    elif "image/jpeg" in content_type:
-
-        extension = ".jpg"
-
-    elif "image/png" in content_type:
-
-        extension = ".png"
-
-    elif "image/webp" in content_type:
-
-        extension = ".webp"
-
-    elif "image/gif" in content_type:
-
-        extension = ".gif"
-
-    output_path = (
+    output_file = (
         output_dir
-        / f"Downloaded_Media{extension}"
+        / filename
     )
 
     total = 0
 
     with open(
-        output_path,
+        output_file,
         "wb",
     ) as file:
 
         for chunk in response.iter_content(
-            chunk_size=1024 * 1024
+            chunk_size=256 * 1024
         ):
 
             if not chunk:
@@ -1052,16 +584,20 @@ def direct_download(
 
             if total > MAX_FILE_SIZE:
 
+                file.close()
+
+                try:
+                    output_file.unlink()
+                except Exception:
+                    pass
+
                 raise RuntimeError(
-                    "The direct media file is larger "
-                    "than the Telegram upload limit."
+                    "The file is larger than the Telegram upload limit."
                 )
 
             file.write(chunk)
 
-    return [
-        output_path
-    ]
+    return output_file
 
 
 # ============================================================
@@ -1069,77 +605,68 @@ def direct_download(
 # ============================================================
 
 def build_ydl_options(
-    output_dir: Path,
+    url: str,
     platform: str,
+    output_dir: Path,
 ):
+
+    cookie_file = create_cookie_file(
+        platform
+    )
 
     options = {
 
-        # Clean internal filenames.
-        #
-        # No title.
-        # No uploader.
-        # No video ID.
-        #
         "outtmpl": str(
             output_dir
             / "Downloaded_Media_%(autonumber)03d.%(ext)s"
         ),
 
-        # Download best available video
-        # and best available audio.
-        "format":
-            "bestvideo*+bestaudio/best",
+        # Prefer video + audio.
+        "format": (
+            "bestvideo*+bestaudio/best"
+        ),
 
-        # Initial merge.
-        "merge_output_format":
-            "mp4",
+        "merge_output_format": "mp4",
 
-        # Playlist support.
-        "noplaylist": False,
+        "noplaylist": True,
 
-        "playlistend":
-            MAX_PLAYLIST_ITEMS,
+        "playlistend": MAX_PLAYLIST_ITEMS,
 
-        # Download reliability.
+        "quiet": True,
+
+        "no_warnings": False,
+
         "retries": 3,
 
         "fragment_retries": 3,
 
-        "concurrent_fragment_downloads": 4,
+        "file_access_retries": 3,
 
         "socket_timeout": 30,
 
-        # HTTP headers.
+        "continuedl": True,
+
+        "overwrites": True,
+
+        "max_filesize": MAX_FILE_SIZE,
+
         "http_headers": {
             "User-Agent": USER_AGENT,
-            "Accept-Language":
-                "en-US,en;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9",
         },
 
-        # Do not generate extra files.
         "writethumbnail": False,
 
         "writeinfojson": False,
-
-        "writedescription": False,
 
         "writesubtitles": False,
 
         "writeautomaticsub": False,
 
-        # Cleaner logging.
-        "quiet": True,
+        "restrictfilenames": True,
 
-        "no_warnings": True,
-
-        # Chrome impersonation when supported.
-        "impersonate": "chrome",
+        "postprocessors": [],
     }
-
-    cookie_file = create_cookie_file(
-        platform
-    )
 
     if cookie_file:
 
@@ -1154,232 +681,650 @@ def build_ydl_options(
 # YT-DLP DOWNLOAD
 # ============================================================
 
-def yt_dlp_download(
+def run_ytdlp(
     url: str,
-    output_dir: Path,
     platform: str,
+    output_dir: Path,
 ):
 
     options = build_ydl_options(
-        output_dir,
-        platform,
+        url=url,
+        platform=platform,
+        output_dir=output_dir,
     )
 
     logger.info(
-        "Starting yt-dlp: %s",
+        "yt-dlp downloading: %s",
         url,
     )
 
-    try:
+    with yt_dlp.YoutubeDL(
+        options
+    ) as ydl:
 
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
-
-            ydl.download(
-                [url]
-            )
-
-    except Exception as first_error:
-
-        logger.warning(
-            "First yt-dlp attempt failed: %s",
-            first_error,
+        info = ydl.extract_info(
+            url,
+            download=True,
         )
 
-        # Retry without Chrome impersonation.
-        options.pop(
-            "impersonate",
-            None,
+        if not info:
+
+            raise RuntimeError(
+                "yt-dlp did not return media information."
+            )
+
+    files = find_media_files(
+        output_dir
+    )
+
+    if not files:
+
+        raise RuntimeError(
+            "No media file was created."
         )
 
-        with yt_dlp.YoutubeDL(
-            options
-        ) as ydl:
-
-            ydl.download(
-                [url]
-            )
+    return files
 
 
 # ============================================================
-# DOWNLOAD AND PROCESS
+# FIND MEDIA
 # ============================================================
 
-def download_media(
-    url: str,
+def find_media_files(
+    directory: Path,
 ):
 
-    job_id = next(
-        tempfile._get_candidate_names()
+    if not directory.exists():
+        return []
+
+    result = []
+
+    for path in directory.rglob("*"):
+
+        if not path.is_file():
+            continue
+
+        if path.name.endswith(
+            (
+                ".part",
+                ".ytdl",
+                ".temp",
+            )
+        ):
+            continue
+
+        if path.suffix.lower() in {
+            ".json",
+            ".description",
+        }:
+            continue
+
+        try:
+
+            if path.stat().st_size <= 0:
+                continue
+
+        except Exception:
+            continue
+
+        result.append(path)
+
+    return sorted(
+        result,
+        key=lambda p: p.stat().st_mtime,
     )
 
-    job_dir = (
-        DOWNLOAD_DIR
-        / job_id
-    )
 
-    job_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+# ============================================================
+# FFMPEG RUNNER
+# ============================================================
 
-    platform = detect_platform(
-        url
+def run_ffmpeg(
+    command,
+    timeout=FFMPEG_TIMEOUT,
+):
+
+    logger.info(
+        "FFmpeg: %s",
+        " ".join(
+            map(str, command)
+        ),
     )
 
     try:
 
-        # ----------------------------------------------------
-        # DIRECT URL
-        # ----------------------------------------------------
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
 
-        if is_direct_media_url(
-            url
+    except subprocess.TimeoutExpired:
+
+        logger.error(
+            "FFmpeg timed out."
+        )
+
+        raise RuntimeError(
+            "Video conversion took too long."
+        )
+
+    if result.returncode != 0:
+
+        logger.error(
+            "FFmpeg failed:\n%s",
+            result.stderr[-3000:],
+        )
+
+        raise RuntimeError(
+            "FFmpeg failed while preparing the video."
+        )
+
+    return result
+
+
+# ============================================================
+# VIDEO PROBE
+# ============================================================
+
+def ffprobe_value(
+    path: Path,
+    selector: str,
+    entry: str,
+):
+
+    try:
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                selector,
+                "-show_entries",
+                f"stream={entry}",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        value = result.stdout.strip()
+
+        return value or None
+
+    except Exception:
+        return None
+
+
+def get_video_codec(
+    path: Path,
+):
+
+    return ffprobe_value(
+        path,
+        "v:0",
+        "codec_name",
+    )
+
+
+def get_audio_codec(
+    path: Path,
+):
+
+    return ffprobe_value(
+        path,
+        "a:0",
+        "codec_name",
+    )
+
+
+def get_video_height(
+    path: Path,
+):
+
+    value = ffprobe_value(
+        path,
+        "v:0",
+        "height",
+    )
+
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def has_video(
+    path: Path,
+):
+
+    return (
+        get_video_codec(path)
+        is not None
+    )
+
+
+# ============================================================
+# VIDEO COMPATIBILITY
+# ============================================================
+
+def is_iphone_compatible_video(
+    path: Path,
+):
+
+    if path.suffix.lower() != ".mp4":
+        return False
+
+    video_codec = get_video_codec(
+        path
+    )
+
+    audio_codec = get_audio_codec(
+        path
+    )
+
+    height = get_video_height(
+        path
+    )
+
+    logger.info(
+        "Video: codec=%s audio=%s height=%s",
+        video_codec,
+        audio_codec,
+        height,
+    )
+
+    if video_codec != "h264":
+        return False
+
+    if audio_codec not in {
+        "aac",
+        None,
+    }:
+        return False
+
+    if height > 1080:
+        return False
+
+    return True
+
+
+# ============================================================
+# FASTSTART REMUX
+# ============================================================
+
+def faststart_mp4(
+    input_path: Path,
+    output_path: Path,
+):
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    run_ffmpeg(
+        command,
+        timeout=30,
+    )
+
+    return output_path
+
+
+# ============================================================
+# VIDEO CONVERSION
+# ============================================================
+
+def convert_video(
+    input_path: Path,
+    output_path: Path,
+    height=720,
+    crf=28,
+    audio_bitrate="128k",
+):
+
+    source_height = get_video_height(
+        input_path
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+
+        "-map",
+        "0:v:0",
+    ]
+
+    # Do not upscale small videos.
+    if (
+        source_height
+        and source_height > height
+    ):
+
+        command.extend(
+            [
+                "-vf",
+                f"scale=-2:{height}",
+            ]
+        )
+
+    command.extend(
+        [
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "ultrafast",
+
+            "-crf",
+            str(crf),
+
+            "-pix_fmt",
+            "yuv420p",
+
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            audio_bitrate,
+
+            "-movflags",
+            "+faststart",
+
+            str(output_path),
+        ]
+    )
+
+    run_ffmpeg(
+        command
+    )
+
+    return output_path
+
+
+# ============================================================
+# PROCESS VIDEO
+# ============================================================
+
+def process_video_file(
+    path: Path,
+):
+
+    size = path.stat().st_size
+
+    logger.info(
+        "Processing video: %.2f MB",
+        size / 1024 / 1024,
+    )
+
+    # --------------------------------------------------------
+    # Already small + compatible
+    # --------------------------------------------------------
+
+    if (
+        size <= MAX_FILE_SIZE
+        and is_iphone_compatible_video(path)
+    ):
+
+        logger.info(
+            "Video already compatible. No conversion required."
+        )
+
+        return path
+
+    # --------------------------------------------------------
+    # H264/AAC but not MP4 or faststart
+    # --------------------------------------------------------
+
+    if size <= MAX_FILE_SIZE:
+
+        video_codec = get_video_codec(
+            path
+        )
+
+        audio_codec = get_audio_codec(
+            path
+        )
+
+        if (
+            video_codec == "h264"
+            and audio_codec in {
+                "aac",
+                None,
+            }
         ):
 
-            files = direct_download(
-                url,
-                job_dir,
+            output = (
+                path.parent
+                / "Downloaded_Media.mp4"
             )
 
-        # ----------------------------------------------------
-        # WEBSITE URL
-        # ----------------------------------------------------
+            try:
 
-        else:
-
-            yt_dlp_download(
-                url,
-                job_dir,
-                platform,
-            )
-
-            files = find_media_files(
-                job_dir
-            )
-
-        if not files:
-
-            raise RuntimeError(
-                "No media files were found."
-            )
-
-        processed_files = []
-
-        # ----------------------------------------------------
-        # PROCESS FILES
-        # ----------------------------------------------------
-
-        for path in files:
-
-            suffix = (
-                path.suffix.lower()
-            )
-
-            # ================================================
-            # VIDEO
-            # ================================================
-
-            if suffix in VIDEO_EXTENSIONS:
-
-                logger.info(
-                    "Converting video for iPhone: %s",
-                    path.name,
+                faststart_mp4(
+                    path,
+                    output,
                 )
 
-                processed = (
-                    process_video_file(
-                        path
-                    )
-                )
+                if (
+                    output.exists()
+                    and output.stat().st_size
+                    <= MAX_FILE_SIZE
+                ):
 
-                processed_files.append(
-                    processed
-                )
-
-            # ================================================
-            # AUDIO
-            # ================================================
-
-            elif suffix in AUDIO_EXTENSIONS:
-
-                size = (
-                    path.stat().st_size
-                )
-
-                if size > MAX_FILE_SIZE:
-
-                    raise RuntimeError(
-                        "Audio file exceeds Telegram's limit."
+                    logger.info(
+                        "Fast MP4 remux successful."
                     )
 
-                processed_files.append(
-                    path
+                    return output
+
+            except Exception as error:
+
+                logger.warning(
+                    "Fast remux failed: %s",
+                    error,
                 )
 
-            # ================================================
-            # IMAGE
-            # ================================================
+    # --------------------------------------------------------
+    # Full conversion
+    # --------------------------------------------------------
 
-            elif suffix in IMAGE_EXTENSIONS:
+    logger.info(
+        "Video requires conversion."
+    )
 
-                size = (
-                    path.stat().st_size
-                )
+    output = (
+        path.parent
+        / "Downloaded_Media.mp4"
+    )
 
-                if size > MAX_FILE_SIZE:
+    try:
 
-                    raise RuntimeError(
-                        "Image exceeds Telegram's limit."
-                    )
+        convert_video(
+            input_path=path,
+            output_path=output,
+            height=720,
+            crf=28,
+            audio_bitrate="128k",
+        )
 
-                processed_files.append(
-                    path
-                )
+        if (
+            output.exists()
+            and output.stat().st_size
+            <= MAX_FILE_SIZE
+        ):
 
-            # ================================================
-            # GIF
-            # ================================================
+            return output
 
-            elif suffix == ".gif":
+    except Exception as error:
 
-                size = (
-                    path.stat().st_size
-                )
+        logger.warning(
+            "720p conversion failed: %s",
+            error,
+        )
 
-                if size > MAX_FILE_SIZE:
+    # --------------------------------------------------------
+    # 480p fallback
+    # --------------------------------------------------------
 
-                    raise RuntimeError(
-                        "GIF exceeds Telegram's limit."
-                    )
+    output_480 = (
+        path.parent
+        / "Downloaded_Media_480p.mp4"
+    )
 
-                processed_files.append(
-                    path
-                )
+    try:
 
-        if not processed_files:
+        convert_video(
+            input_path=path,
+            output_path=output_480,
+            height=480,
+            crf=31,
+            audio_bitrate="96k",
+        )
 
-            raise RuntimeError(
-                "No supported media files were found."
-            )
+        if (
+            output_480.exists()
+            and output_480.stat().st_size
+            <= MAX_FILE_SIZE
+        ):
 
-        return (
-            job_dir,
-            processed_files,
+            return output_480
+
+    except Exception as error:
+
+        logger.warning(
+            "480p conversion failed: %s",
+            error,
+        )
+
+    raise RuntimeError(
+        "Video could not be prepared within the 45 MB Telegram limit."
+    )
+
+
+# ============================================================
+# LIGHTNING GIF
+# ============================================================
+
+def create_lightning_gif():
+
+    if LIGHTNING_GIF.exists():
+        return
+
+    width = 500
+    height = 220
+
+    frames = []
+
+    try:
+
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSans-Bold.ttf",
+            32,
         )
 
     except Exception:
 
-        cleanup_directory(
-            job_dir
+        font = ImageFont.load_default()
+
+    for frame_number in range(12):
+
+        image = Image.new(
+            "RGB",
+            (width, height),
+            (15, 15, 25),
         )
 
-        raise
+        draw = ImageDraw.Draw(
+            image
+        )
+
+        # Lightning
+        lightning = [
+            (235, 20),
+            (185, 105),
+            (225, 105),
+            (175, 200),
+            (315, 90),
+            (270, 90),
+            (320, 20),
+        ]
+
+        offset = (
+            frame_number % 3
+        )
+
+        points = [
+            (
+                x + offset,
+                y,
+            )
+            for x, y in lightning
+        ]
+
+        draw.polygon(
+            points,
+            fill="white",
+        )
+
+        text = "PROCESSING..."
+
+        bbox = draw.textbbox(
+            (0, 0),
+            text,
+            font=font,
+        )
+
+        text_width = (
+            bbox[2] - bbox[0]
+        )
+
+        draw.text(
+            (
+                (width - text_width) / 2,
+                185,
+            ),
+            text,
+            fill="white",
+            font=font,
+        )
+
+        frames.append(
+            image
+        )
+
+    frames[0].save(
+        LIGHTNING_GIF,
+        save_all=True,
+        append_images=frames[1:],
+        duration=120,
+        loop=0,
+    )
 
 
 # ============================================================
-# SEND VIDEO/AUDIO/IMAGE
+# SEND FILE
 # ============================================================
 
 async def send_file(
@@ -1387,23 +1332,24 @@ async def send_file(
     path: Path,
 ):
 
-    suffix = (
-        path.suffix.lower()
-    )
+    if not path.exists():
+        raise RuntimeError(
+            "Downloaded file no longer exists."
+        )
 
-    size = (
-        path.stat().st_size
-    )
+    size = path.stat().st_size
 
     if size > MAX_FILE_SIZE:
 
         raise RuntimeError(
-            "File is larger than the Telegram upload limit."
+            "File is larger than the 45 MB upload limit."
         )
 
-    # ========================================================
-    # VIDEO
-    # ========================================================
+    suffix = path.suffix.lower()
+
+    # --------------------------------------------------------
+    # MP4 / video
+    # --------------------------------------------------------
 
     if suffix == ".mp4":
 
@@ -1418,18 +1364,15 @@ async def send_file(
 
             await update.message.reply_video(
                 video=video,
-
-                # No filename/title/creator caption.
                 caption=None,
-
                 supports_streaming=True,
             )
 
         return
 
-    # ========================================================
-    # OTHER VIDEO
-    # ========================================================
+    # --------------------------------------------------------
+    # Other videos
+    # --------------------------------------------------------
 
     if suffix in VIDEO_EXTENSIONS:
 
@@ -1444,17 +1387,15 @@ async def send_file(
 
             await update.message.reply_video(
                 video=video,
-
                 caption=None,
-
                 supports_streaming=True,
             )
 
         return
 
-    # ========================================================
-    # AUDIO
-    # ========================================================
+    # --------------------------------------------------------
+    # Audio
+    # --------------------------------------------------------
 
     if suffix in AUDIO_EXTENSIONS:
 
@@ -1469,15 +1410,14 @@ async def send_file(
 
             await update.message.reply_audio(
                 audio=audio,
-
                 caption=None,
             )
 
         return
 
-    # ========================================================
-    # IMAGE
-    # ========================================================
+    # --------------------------------------------------------
+    # Images
+    # --------------------------------------------------------
 
     if suffix in IMAGE_EXTENSIONS:
 
@@ -1496,9 +1436,9 @@ async def send_file(
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # GIF
-    # ========================================================
+    # --------------------------------------------------------
 
     if suffix == ".gif":
 
@@ -1517,9 +1457,9 @@ async def send_file(
 
         return
 
-    # ========================================================
-    # FALLBACK DOCUMENT
-    # ========================================================
+    # --------------------------------------------------------
+    # Everything else
+    # --------------------------------------------------------
 
     await update.message.chat.send_action(
         ChatAction.UPLOAD_DOCUMENT
@@ -1537,102 +1477,50 @@ async def send_file(
 
 
 # ============================================================
-# CREATE LIGHTNING GIF
+# DOWNLOAD JOB
 # ============================================================
 
-def create_lightning_gif():
+def download_job(
+    url: str,
+    platform: str,
+    job_dir: Path,
+):
 
-    if LIGHTNING_GIF.exists():
-        return
-
-    frames = []
-
-    try:
-
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/"
-            "DejaVuSans-Bold.ttf",
-            42,
-        )
-
-    except Exception:
-
-        font = ImageFont.load_default()
-
-    for frame_number in range(8):
-
-        image = Image.new(
-            "RGB",
-            (500, 180),
-            "black",
-        )
-
-        draw = ImageDraw.Draw(
-            image
-        )
-
-        text = "⚡ PROCESSING..."
-
-        try:
-
-            box = draw.textbbox(
-                (0, 0),
-                text,
-                font=font,
-            )
-
-            width = (
-                box[2] - box[0]
-            )
-
-            height = (
-                box[3] - box[1]
-            )
-
-            x = (
-                500 - width
-            ) // 2
-
-            y = (
-                180 - height
-            ) // 2
-
-            # Small movement.
-            y += (
-                frame_number % 5
-            )
-
-            draw.text(
-                (x, y),
-                text,
-                fill="white",
-                font=font,
-            )
-
-        except Exception:
-
-            draw.text(
-                (175, 80),
-                text,
-                fill="white",
-                font=font,
-            )
-
-        frames.append(
-            image
-        )
-
-    frames[0].save(
-        LIGHTNING_GIF,
-        save_all=True,
-        append_images=frames[1:],
-        duration=140,
-        loop=0,
+    logger.info(
+        "Starting download: %s",
+        url,
     )
 
+    # --------------------------------------------------------
+    # Direct media URL
+    # --------------------------------------------------------
+
+    if is_direct_media_url(url):
+
+        file_path = direct_download(
+            url,
+            job_dir,
+        )
+
+        return [
+            file_path
+        ]
+
+    # --------------------------------------------------------
+    # yt-dlp
+    # --------------------------------------------------------
+
+    files = run_ytdlp(
+        url=url,
+        platform=platform,
+        output_dir=job_dir,
+    )
+
+    return files
+
 
 # ============================================================
-# /START
+# START COMMAND
 # ============================================================
 
 async def start_command(
@@ -1642,18 +1530,15 @@ async def start_command(
 
     await update.message.reply_text(
         "👋 Welcome to Universal Media Downloader!\n\n"
-        "🔗 Send me a media link.\n\n"
-        "⚡ I will download and prepare it "
-        "for Telegram and iPhone.\n\n"
-        "🎵 Available original audio is preserved "
-        "whenever possible.\n\n"
-        "📱 Videos are converted to a "
-        "compatible H.264/AAC MP4 format."
+        "📥 Send me a media link.\n\n"
+        "⚡ I will download the available media.\n"
+        "🎵 Available original audio is preserved whenever possible.\n\n"
+        "Use /help for supported platforms."
     )
 
 
 # ============================================================
-# /HELP
+# HELP COMMAND
 # ============================================================
 
 async def help_command(
@@ -1664,7 +1549,9 @@ async def help_command(
     await update.message.reply_text(
         "📥 Universal Media Downloader\n\n"
 
-        "Supported platforms:\n"
+        "Send a media URL and I will download it.\n\n"
+
+        "Supported platforms include:\n"
         "• Instagram\n"
         "• Facebook\n"
         "• YouTube\n"
@@ -1678,12 +1565,46 @@ async def help_command(
         "• Dailymotion\n"
         "• Twitch\n\n"
 
-        "Direct video, audio and image URLs "
-        "are also supported.\n\n"
+        "Direct media:\n"
+        "• MP4\n"
+        "• MOV\n"
+        "• WebM\n"
+        "• MP3\n"
+        "• M4A\n"
+        "• WAV\n"
+        "• JPG\n"
+        "• PNG\n"
+        "• GIF\n"
+        "• WebP\n\n"
 
-        "📱 Video output:\n"
-        "H.264 + AAC + MP4 + faststart"
+        "🎵 Original available audio is preserved whenever possible."
     )
+
+
+# ============================================================
+# PROCESSING MESSAGE UPDATE
+# ============================================================
+
+async def update_processing_message(
+    message,
+    text: str,
+):
+
+    if not message:
+        return
+
+    try:
+
+        await message.edit_caption(
+            caption=text
+        )
+
+    except Exception as error:
+
+        logger.debug(
+            "Could not update processing message: %s",
+            error,
+        )
 
 
 # ============================================================
@@ -1701,7 +1622,15 @@ async def handle_message(
     text = (
         update.message.text
         or ""
-    )
+    ).strip()
+
+    # ========================================================
+    # IMPORTANT:
+    # DO NOTHING IF THERE IS NO URL.
+    #
+    # Therefore the processing animation appears ONLY when
+    # a real URL is sent.
+    # ========================================================
 
     url = extract_url(
         text
@@ -1709,10 +1638,8 @@ async def handle_message(
 
     if not url:
 
-        await update.message.reply_text(
-            "❌ Please send a valid media link."
-        )
-
+        # Do not send processing message.
+        # Do not reply to ordinary text.
         return
 
     url = normalize_url(
@@ -1724,7 +1651,7 @@ async def handle_message(
     )
 
     logger.info(
-        "Received URL | platform=%s | %s",
+        "URL received | platform=%s | %s",
         platform,
         url,
     )
@@ -1735,7 +1662,23 @@ async def handle_message(
     try:
 
         # ====================================================
-        # PROCESSING ANIMATION
+        # CREATE JOB DIRECTORY
+        # ====================================================
+
+        job_dir = (
+            DOWNLOAD_DIR
+            / next(
+                tempfile._get_candidate_names()
+            )
+        )
+
+        job_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # ====================================================
+        # ONLY NOW SHOW PROCESSING
         # ====================================================
 
         create_lightning_gif()
@@ -1751,28 +1694,36 @@ async def handle_message(
                     await update.message.reply_animation(
                         animation=gif,
                         caption=(
-                            "⚡ Thanks for providing the link!\n\n"
-                            f"Platform: {platform.title()}\n"
-                            "Downloading and preparing your media..."
+                            "⚡ Processing your link...\n\n"
+                            f"Platform: {platform.title()}"
                         ),
                     )
                 )
 
         # ====================================================
-        # DOWNLOAD IN EXECUTOR
+        # DOWNLOAD
         # ====================================================
+
+        if processing_message:
+
+            await update_processing_message(
+                processing_message,
+                (
+                    "⚡ Downloading media...\n\n"
+                    f"Platform: {platform.title()}"
+                ),
+            )
 
         loop = (
             asyncio.get_running_loop()
         )
 
-        job_dir, files = (
-            await loop.run_in_executor(
-                None,
-                lambda: download_media(
-                    url
-                ),
-            )
+        files = await loop.run_in_executor(
+            None,
+            download_job,
+            url,
+            platform,
+            job_dir,
         )
 
         if not files:
@@ -1782,60 +1733,74 @@ async def handle_message(
             )
 
         # ====================================================
-        # DELETE PROCESSING MESSAGE
+        # SEND FILES
         # ====================================================
 
-        if processing_message:
+        total_files = len(files)
 
-            try:
+        for index, file_path in enumerate(
+            files,
+            start=1,
+        ):
 
-                await processing_message.delete()
+            if processing_message:
 
-            except Exception:
-                pass
+                await update_processing_message(
+                    processing_message,
+                    (
+                        "⚡ Preparing media...\n\n"
+                        f"File {index}/{total_files}"
+                    ),
+                )
 
-            processing_message = None
+            # ----------------------------------------------
+            # Video
+            # ----------------------------------------------
 
-        # ====================================================
-        # SEND MEDIA
-        # ====================================================
+            if (
+                file_path.suffix.lower()
+                in VIDEO_EXTENSIONS
+            ):
 
-        sent_count = 0
-
-        for file_path in files:
-
-            try:
-
-                await send_file(
-                    update,
+                file_path = await loop.run_in_executor(
+                    None,
+                    process_video_file,
                     file_path,
                 )
 
-                sent_count += 1
+            # ----------------------------------------------
+            # Check final size
+            # ----------------------------------------------
 
-            except Exception as error:
+            if (
+                not file_path.exists()
+            ):
 
-                logger.exception(
-                    "Failed to send file"
+                raise RuntimeError(
+                    "Downloaded file disappeared before upload."
                 )
 
-                await update.message.reply_text(
-                    "❌ The media was downloaded, "
-                    "but Telegram could not send it.\n\n"
-                    f"Reason: {error}"
+            if (
+                file_path.stat().st_size
+                > MAX_FILE_SIZE
+            ):
+
+                raise RuntimeError(
+                    "Downloaded media is larger than the 45 MB Telegram limit."
                 )
 
-        if sent_count == 0:
+            # ----------------------------------------------
+            # Send
+            # ----------------------------------------------
 
-            raise RuntimeError(
-                "No media could be uploaded to Telegram."
+            await send_file(
+                update,
+                file_path,
             )
 
-    except Exception as error:
-
-        logger.exception(
-            "Download failed"
-        )
+        # ====================================================
+        # REMOVE PROCESSING MESSAGE
+        # ====================================================
 
         if processing_message:
 
@@ -1844,58 +1809,113 @@ async def handle_message(
                 await processing_message.delete()
 
             except Exception:
+
                 pass
+
+    except yt_dlp.utils.DownloadError as error:
+
+        logger.exception(
+            "yt-dlp download failed."
+        )
 
         error_text = str(
             error
         )
 
-        if len(error_text) > 1800:
-
+        if len(error_text) > 1200:
             error_text = (
-                error_text[-1800:]
+                error_text[:1200]
+                + "..."
             )
 
-        await update.message.reply_text(
-            "❌ I couldn't download this media.\n\n"
+        if processing_message:
 
-            f"🌐 Platform: {platform.title()}\n\n"
+            await update_processing_message(
+                processing_message,
+                (
+                    "❌ Download failed.\n\n"
+                    f"{error_text}"
+                ),
+            )
 
-            "Technical reason:\n"
-            f"{error_text}\n\n"
+        else:
 
-            "Possible reasons:\n"
-            "• The media is private\n"
-            "• Login is required\n"
-            "• Cookies are missing or expired\n"
-            "• The link has expired\n"
-            "• The website blocked the request\n"
-            "• The website changed its extractor\n"
-            "• The media is larger than Telegram allows"
+            await update.message.reply_text(
+                "❌ Download failed."
+            )
+
+    except Exception as error:
+
+        logger.exception(
+            "Media processing failed."
         )
+
+        error_text = str(
+            error
+        )
+
+        if not error_text:
+            error_text = (
+                "Unknown error."
+            )
+
+        if len(error_text) > 1200:
+            error_text = (
+                error_text[:1200]
+                + "..."
+            )
+
+        if processing_message:
+
+            await update_processing_message(
+                processing_message,
+                (
+                    "❌ Media processing failed.\n\n"
+                    f"{error_text}"
+                ),
+            )
+
+        else:
+
+            await update.message.reply_text(
+                (
+                    "❌ Media processing failed.\n\n"
+                    f"{error_text}"
+                )
+            )
 
     finally:
 
-        # Delete all temporary downloaded files.
+        # ====================================================
+        # CLEAN TEMP FILES
+        # ====================================================
+
         if job_dir:
 
-            cleanup_directory(
-                job_dir
-            )
+            try:
+
+                shutil.rmtree(
+                    job_dir,
+                    ignore_errors=True,
+                )
+
+            except Exception:
+
+                pass
 
 
 # ============================================================
-# TELEGRAM ERROR HANDLER
+# ERROR HANDLER
 # ============================================================
 
-async def telegram_error_handler(
+async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    logger.error(
-        "Telegram error: %s",
-        context.error,
+    logger.exception(
+        "Telegram error:",
+        exc_info=context.error,
     )
 
 
@@ -1905,33 +1925,8 @@ async def telegram_error_handler(
 
 def main():
 
-    if not BOT_TOKEN:
-
-        raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
-        )
-
-    create_lightning_gif()
-
     logger.info(
-        "============================================"
-    )
-
-    logger.info(
-        "Universal Media Downloader"
-    )
-
-    logger.info(
-        "Starting..."
-    )
-
-    logger.info(
-        "yt-dlp version: %s",
-        yt_dlp.version.__version__,
-    )
-
-    logger.info(
-        "============================================"
+        "Starting Universal Media Downloader..."
     )
 
     application = (
@@ -1940,10 +1935,7 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # COMMANDS
-    # --------------------------------------------------------
-
+    # Commands
     application.add_handler(
         CommandHandler(
             "start",
@@ -1958,10 +1950,12 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # URL MESSAGES
-    # --------------------------------------------------------
-
+    # IMPORTANT:
+    # Only normal TEXT messages are handled.
+    #
+    # handle_message() first checks for a URL.
+    # If there is no URL, it returns without showing
+    # any processing message.
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -1970,27 +1964,18 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # ERROR HANDLER
-    # --------------------------------------------------------
-
     application.add_error_handler(
-        telegram_error_handler
+        error_handler
     )
 
-    # --------------------------------------------------------
-    # START
-    # --------------------------------------------------------
+    logger.info(
+        "Bot is running."
+    )
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
 
-# ============================================================
-# PROGRAM ENTRY
-# ============================================================
-
 if __name__ == "__main__":
-
     main()
