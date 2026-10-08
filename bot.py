@@ -334,14 +334,94 @@ def convert_to_mp4(
             "FFmpeg is not installed."
         )
 
+    # --------------------------------------------------------
+    # First inspect the source
+    # --------------------------------------------------------
+
+    probe_command = [
+        ffmpeg,
+        "-i",
+        str(input_file),
+    ]
+
+    try:
+
+        probe = subprocess.run(
+            probe_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+
+        probe_text = probe.stderr
+
+    except Exception as error:
+
+        return (
+            None,
+            f"Could not inspect video: {error}"
+        )
+
+    # --------------------------------------------------------
+    # Detect audio
+    # --------------------------------------------------------
+
+    has_audio = (
+        "Audio:" in probe_text
+    )
+
+    logger.info(
+        "Input has audio: %s",
+        has_audio,
+    )
+
+    # --------------------------------------------------------
+    # Common video settings
+    #
+    # Keep maximum dimension at 720.
+    #
+    # Portrait:
+    # 1440x2560 -> 405x720
+    #
+    # Landscape:
+    # 2560x1440 -> 720x405
+    #
+    # Square:
+    # 1440x1440 -> 720x720
+    # --------------------------------------------------------
+
+    video_filter = (
+        "scale="
+        "w='min(720,iw)':"
+        "h='min(720,ih)':"
+        "force_original_aspect_ratio=decrease,"
+        "pad="
+        "ceil(iw/2)*2:"
+        "ceil(ih/2)*2:"
+        "(ow-iw)/2:"
+        "(oh-ih)/2"
+    )
+
+    # --------------------------------------------------------
+    # Base command
+    # --------------------------------------------------------
+
     command = [
         ffmpeg,
+
         "-y",
 
         "-i",
         str(input_file),
 
         # Video
+        "-map",
+        "0:v:0",
+
+        "-vf",
+        video_filter,
+
         "-c:v",
         "libx264",
 
@@ -349,18 +429,54 @@ def convert_to_mp4(
         "veryfast",
 
         "-crf",
-        "23",
+        "26",
 
-        # Audio
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "128k",
-
-        # Compatibility
         "-pix_fmt",
         "yuv420p",
+
+        # Limit extreme Instagram 60fps sources
+        "-r",
+        "30",
+    ]
+
+    # --------------------------------------------------------
+    # Audio
+    # --------------------------------------------------------
+
+    if has_audio:
+
+        command += [
+
+            "-map",
+            "0:a:0?",
+
+            "-c:a",
+            "aac",
+
+            "-b:a",
+            "96k",
+
+            "-ar",
+            "44100",
+
+            "-ac",
+            "2",
+        ]
+
+    else:
+
+        # No audio stream.
+        # Do NOT add audio encoding options.
+        logger.info(
+            "No audio stream detected. "
+            "Creating video-only MP4."
+        )
+
+    # --------------------------------------------------------
+    # MP4 compatibility
+    # --------------------------------------------------------
+
+    command += [
 
         "-movflags",
         "+faststart",
@@ -368,17 +484,16 @@ def convert_to_mp4(
         str(output_file),
     ]
 
+    logger.info(
+        "Starting FFmpeg conversion..."
+    )
+
+    logger.info(
+        "FFmpeg command: %s",
+        " ".join(command),
+    )
+
     try:
-
-        logger.info(
-            "FFmpeg input: %s",
-            input_file
-        )
-
-        logger.info(
-            "FFmpeg input size: %.2f MB",
-            input_file.stat().st_size / 1024 / 1024
-        )
 
         result = subprocess.run(
             command,
@@ -392,40 +507,45 @@ def convert_to_mp4(
             timeout=300,
         )
 
-        # IMPORTANT:
-        # Always print the real FFmpeg error.
+        # ----------------------------------------------------
+        # Failure
+        # ----------------------------------------------------
+
         if result.returncode != 0:
 
             logger.error(
-                "FFmpeg FAILED."
-            )
-
-            logger.error(
-                "FFmpeg return code: %s",
+                "FFmpeg failed with code %s",
                 result.returncode,
             )
 
             logger.error(
                 "FFmpeg stderr:\n%s",
-                result.stderr[-8000:],
+                result.stderr[-10000:],
             )
 
             return (
                 None,
                 "FFmpeg conversion failed.\n\n"
-                f"FFmpeg error:\n"
-                f"{result.stderr[-5000:]}"
+                + result.stderr[-5000:],
             )
+
+        # ----------------------------------------------------
+        # Verify output
+        # ----------------------------------------------------
 
         if not output_file.exists():
 
             return (
                 None,
-                "FFmpeg completed but "
+                "FFmpeg finished but "
                 "did not create the MP4."
             )
 
-        if output_file.stat().st_size <= 0:
+        output_size = (
+            output_file.stat().st_size
+        )
+
+        if output_size <= 0:
 
             return (
                 None,
@@ -433,8 +553,12 @@ def convert_to_mp4(
             )
 
         logger.info(
-            "FFmpeg conversion successful: %s",
-            output_file
+            "FFmpeg conversion successful."
+        )
+
+        logger.info(
+            "Output size: %.2f MB",
+            output_size / 1024 / 1024,
         )
 
         return (
@@ -445,18 +569,18 @@ def convert_to_mp4(
     except subprocess.TimeoutExpired:
 
         logger.error(
-            "FFmpeg conversion timed out."
+            "FFmpeg timed out."
         )
 
         return (
             None,
-            "FFmpeg conversion timed out after 5 minutes."
+            "FFmpeg conversion timed out."
         )
 
     except Exception as error:
 
         logger.exception(
-            "FFmpeg conversion exception."
+            "FFmpeg exception."
         )
 
         return (
