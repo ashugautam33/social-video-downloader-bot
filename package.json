@@ -1,6 +1,5 @@
-
 {
-  "name": "telegram-media-downloader",
+  "name": "universal-media-downloader",
   "version": "1.0.0",
   "private": true,
   "engines": {
