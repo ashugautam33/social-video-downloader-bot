@@ -610,22 +610,24 @@ def build_ydl_options(
     platform: str,
     output_dir: Path,
 ):
+    
     cookie_file = create_cookie_file(platform)
 
     if platform == "youtube":
-    if cookie_file and Path(cookie_file).is_file():
-        logger.info(
-            "YouTube cookie file exists; size=%s bytes",
-            Path(cookie_file).stat().st_size,
-        )
-    else:
-        logger.error(
-            "YouTube cookies are missing or could not be created."
-        )
+        if cookie_file and Path(cookie_file).is_file():
+            logger.info(
+                "YouTube cookie file exists; size=%s bytes",
+                Path(cookie_file).stat().st_size,
+            )
+        else:
+            logger.error(
+                "YouTube cookies are missing or could not be created."
+            )
 
     options = {
-        "outtmpl": str(
-            output_dir
+        # Keep all your existing options here.
+    }
+
             / "Downloaded_Media_%(autonumber)03d.%(ext)s"
         ),
 
