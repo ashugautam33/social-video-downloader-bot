@@ -1,4 +1,4 @@
-yt-dlp[default,curl-ffi]
 python-telegram-bot==22.5
+yt-dlp[default,curl-ffi]
 requests
 Pillow
