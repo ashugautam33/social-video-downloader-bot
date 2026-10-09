@@ -1,5 +1,6 @@
 
 python-telegram-bot>=22.0,<23.0
-yt-dlp
 requests
 gallery-dl
+yt-dlp[default]
+--pre
