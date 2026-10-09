@@ -648,7 +648,50 @@ def build_ydl_options(
 
     return options
 
-            / "Downloaded_Media_%(autonumber)03d.%(ext)s"
+      
+def build_ydl_options(
+    url: str,
+    platform: str,
+    output_dir: Path,
+):
+    cookie_file = create_cookie_file(platform)
+
+    options = {
+        "outtmpl": str(
+            output_dir / "Downloaded_Media_%(autonumber)03d.%(ext)s"
+        ),
+        "format": "bestvideo*+bestaudio/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "playlistend": MAX_PLAYLIST_ITEMS,
+        "quiet": True,
+        "no_warnings": False,
+        "retries": 3,
+        "fragment_retries": 3,
+        "file_access_retries": 3,
+        "socket_timeout": 30,
+        "continuedl": True,
+        "overwrites": True,
+        "max_filesize": MAX_FILE_SIZE,
+        "http_headers": {
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "writethumbnail": False,
+        "writeinfojson": False,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+        "restrictfilenames": True,
+        "postprocessors": [],
+    }
+
+    if cookie_file:
+        options["cookiefile"] = cookie_file
+
+    return options
+
+
+         / "Downloaded_Media_%(autonumber)03d.%(ext)s"
         ),
 
         "format": "bestvideo*+bestaudio/best",
