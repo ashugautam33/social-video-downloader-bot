@@ -658,11 +658,11 @@ def build_ydl_options(
     # Optional YouTube player client configuration.
     
     if platform == "youtube":
-    options["extractor_args"] = {
-        "youtube": {
-            "player_client": ["default", "web_embedded"],
+        options["extractor_args"] = {
+            "youtube": {
+                "player_client": ["default", "web_embedded"],
+            }
         }
-    }
 
     return options
 
