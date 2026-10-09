@@ -612,6 +612,17 @@ def build_ydl_options(
 ):
     cookie_file = create_cookie_file(platform)
 
+    if platform == "youtube":
+    if cookie_file and Path(cookie_file).is_file():
+        logger.info(
+            "YouTube cookie file exists; size=%s bytes",
+            Path(cookie_file).stat().st_size,
+        )
+    else:
+        logger.error(
+            "YouTube cookies are missing or could not be created."
+        )
+
     options = {
         "outtmpl": str(
             output_dir
