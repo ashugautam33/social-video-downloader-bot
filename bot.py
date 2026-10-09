@@ -55,20 +55,10 @@ COOKIE_ENV = {
     "tiktok": "TIKTOK_COOKIES_B64",
 }
 
-SUPPORTED_DOMAINS = {
-    "youtube.com": "youtube",
-    "youtu.be": "youtube",
-    "instagram.com": "instagram",
-    "facebook.com": "facebook",
-    "fb.watch": "facebook",
-    "tiktok.com": "tiktok",
-    "x.com": "generic",
-    "twitter.com": "generic",
-    "reddit.com": "generic",
-    "pinterest.com": "generic",
-    "soundcloud.com": "generic",
-    "vimeo.com": "generic",
-}
+URL_PATTERN = re.compile(
+    r"https?://[^\s<>\"']+",
+    re.IGNORECASE,
+)
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp",
@@ -85,11 +75,6 @@ VIDEO_EXTENSIONS = {
     ".avi", ".mpeg", ".mpg", ".3gp", ".ts",
 }
 
-URL_PATTERN = re.compile(
-    r"https?://[^\s<>\"']+",
-    re.IGNORECASE,
-)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -102,7 +87,7 @@ logger = logging.getLogger("universal_media_bot")
 # ============================================================
 
 def extract_url(text):
-    """Extract the first HTTP(S) link from a message."""
+    """Extract the first HTTP(S) URL from a message."""
     if not text:
         return None
 
@@ -129,43 +114,59 @@ def extract_url(text):
     return None
 
 
+def detect_platform(url):
+    """Identify common websites for optional cookie support."""
+    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    hostname = hostname.removeprefix("www.")
+
+    if hostname == "youtu.be" or hostname.endswith(".youtube.com") or hostname == "youtube.com":
+        return "youtube"
+
+    if hostname == "instagram.com" or hostname.endswith(".instagram.com"):
+        return "instagram"
+
+    if hostname == "facebook.com" or hostname.endswith(".facebook.com"):
+        return "facebook"
+
+    if hostname == "fb.watch":
+        return "facebook"
+
+    if hostname == "tiktok.com" or hostname.endswith(".tiktok.com"):
+        return "tiktok"
+
+    return "generic"
+
+
 def validate_public_url(url):
-    """Reject obvious private-network destinations."""
+    """
+    Basic SSRF protection: reject URLs resolving to private,
+    loopback, link-local, or otherwise non-public IP addresses.
+    """
     parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Invalid HTTP or HTTPS URL.")
+
     hostname = parsed.hostname
 
-    if parsed.scheme not in ("http", "https") or not hostname:
-        raise ValueError("Invalid URL.")
-
     try:
-        direct_ip = ipaddress.ip_address(hostname)
-        addresses = [direct_ip]
+        ip = ipaddress.ip_address(hostname)
+        addresses = [ip]
     except ValueError:
         try:
             addresses = [
                 ipaddress.ip_address(result[4][0].split("%")[0])
                 for result in socket.getaddrinfo(hostname, None)
             ]
-        except (socket.gaierror, ValueError, OSError):
-            raise ValueError("Unable to resolve the URL hostname.")
+        except (socket.gaierror, ValueError, OSError) as exc:
+            raise ValueError("The URL hostname could not be resolved.") from exc
 
     if not addresses:
-        raise ValueError("Unable to resolve the URL hostname.")
+        raise ValueError("The URL hostname has no valid IP addresses.")
 
     for address in addresses:
         if not address.is_global:
             raise ValueError("Private or local network URLs are not allowed.")
-
-
-def detect_platform(url):
-    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-    hostname = hostname.removeprefix("www.")
-
-    for domain, platform in SUPPORTED_DOMAINS.items():
-        if hostname == domain or hostname.endswith("." + domain):
-            return platform
-
-    return "generic"
 
 
 # ============================================================
@@ -173,7 +174,7 @@ def detect_platform(url):
 # ============================================================
 
 def create_cookie_file(platform):
-    """Load Base64-encoded Netscape cookies from environment variables."""
+    """Read optional Base64-encoded Netscape cookies from environment."""
     variable = COOKIE_ENV.get(platform)
 
     if not variable:
@@ -190,7 +191,7 @@ def create_cookie_file(platform):
             validate=True,
         ).decode("utf-8-sig")
 
-        valid_header = any(
+        has_header = any(
             line.strip().startswith(
                 (
                     "# Netscape HTTP Cookie File",
@@ -200,8 +201,11 @@ def create_cookie_file(platform):
             for line in content.splitlines()[:10]
         )
 
-        if not valid_header:
-            logger.warning("%s is not a valid Netscape cookie file.", variable)
+        if not has_header:
+            logger.warning(
+                "COOKIE CONFIGURATION ERROR: %s is not a Netscape cookies file.",
+                variable,
+            )
             return None
 
         cookie_path = COOKIE_DIR / f"{platform}.txt"
@@ -209,16 +213,17 @@ def create_cookie_file(platform):
         return str(cookie_path)
 
     except (binascii.Error, UnicodeDecodeError, OSError):
-        logger.warning("Could not read cookies from %s.", variable)
+        logger.exception("COOKIE CONFIGURATION ERROR for %s.", variable)
         return None
 
 
 # ============================================================
-# FILE HELPERS
+# TEMPORARY FILE HELPERS
 # ============================================================
 
 def find_media_files(folder):
-    ignored_extensions = {
+    """Return finished files and ignore partial downloads and metadata."""
+    ignored = {
         ".part", ".ytdl", ".json", ".description",
         ".vtt", ".srt", ".ass", ".lrc",
     }
@@ -229,7 +234,7 @@ def find_media_files(folder):
         if not path.is_file():
             continue
 
-        if path.suffix.lower() in ignored_extensions:
+        if path.suffix.lower() in ignored:
             continue
 
         if path.name.endswith((".part", ".ytdl")):
@@ -239,7 +244,7 @@ def find_media_files(folder):
             if path.stat().st_size > 0:
                 results.append(path)
         except OSError:
-            continue
+            logger.exception("Could not inspect a downloaded file.")
 
     return sorted(
         results,
@@ -249,6 +254,7 @@ def find_media_files(folder):
 
 
 def clear_folder(folder):
+    """Remove files before trying a second download method."""
     for path in folder.iterdir():
         try:
             if path.is_file() or path.is_symlink():
@@ -256,11 +262,11 @@ def clear_folder(folder):
             elif path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
-            logger.warning("Could not remove a temporary file.")
+            logger.warning("Could not remove temporary file: %s", path.name)
 
 
 # ============================================================
-# YT-DLP DOWNLOAD
+# YT-DLP OPTIONS
 # ============================================================
 
 def build_ydl_options(url, folder):
@@ -274,7 +280,8 @@ def build_ydl_options(url, folder):
         "no_warnings": False,
         "retries": 1,
         "fragment_retries": 1,
-        "socket_timeout": 20,
+        "file_access_retries": 1,
+        "socket_timeout": 15,
         "continuedl": True,
         "overwrites": True,
         "max_filesize": MAX_FILE_SIZE,
@@ -292,37 +299,60 @@ def build_ydl_options(url, folder):
 
     if cookie_file:
         options["cookiefile"] = cookie_file
+        logger.info("Cookies configured for platform: %s", platform)
 
     return options
 
 
+# ============================================================
+# YT-DLP DOWNLOAD
+# ============================================================
+
 def download_with_ytdlp(url, folder):
+    logger.info(
+        "YTDLP START | platform=%s",
+        detect_platform(url),
+    )
+
     options = build_ydl_options(url, folder)
 
     with yt_dlp.YoutubeDL(options) as downloader:
-        info = downloader.extract_info(url, download=True)
+        info = downloader.extract_info(
+            url,
+            download=True,
+        )
 
         if not info:
-            raise RuntimeError("No media information was returned.")
+            raise RuntimeError("yt-dlp returned no media information.")
 
     files = find_media_files(folder)
 
     for path in files:
         if path.stat().st_size <= MAX_FILE_SIZE:
+            logger.info(
+                "YTDLP SUCCESS | extension=%s | size=%s",
+                path.suffix,
+                path.stat().st_size,
+            )
             return path
 
     if files:
-        raise RuntimeError("The downloaded file exceeds the size limit.")
+        raise RuntimeError("Downloaded media exceeds the 45 MB limit.")
 
-    raise RuntimeError("No completed media file was created.")
+    raise RuntimeError("yt-dlp finished without producing a media file.")
 
 
 # ============================================================
-# DIRECT IMAGE/AUDIO/VIDEO/FILE DOWNLOAD
+# DIRECT FILE DOWNLOAD
 # ============================================================
 
 def download_direct_file(url, folder):
+    """
+    Download direct media URLs, checking every redirect.
+    This method cannot extract media from an ordinary webpage.
+    """
     current_url = url
+
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "*/*",
@@ -336,7 +366,7 @@ def download_direct_file(url, folder):
                 current_url,
                 headers=headers,
                 stream=True,
-                timeout=(10, 20),
+                timeout=(8, 15),
                 allow_redirects=False,
             )
 
@@ -345,7 +375,7 @@ def download_direct_file(url, folder):
                 response.close()
 
                 if not location:
-                    raise RuntimeError("Invalid redirect response.")
+                    raise RuntimeError("Redirect has no Location header.")
 
                 current_url = urljoin(current_url, location)
                 continue
@@ -365,7 +395,7 @@ def download_direct_file(url, folder):
                     "application/xhtml+xml",
                 }:
                     raise RuntimeError(
-                        "The URL opens a webpage, not a direct media file."
+                        "URL returned HTML, not a direct media file."
                     )
 
                 content_length = response.headers.get("Content-Length")
@@ -373,12 +403,11 @@ def download_direct_file(url, folder):
                 if content_length:
                     try:
                         if int(content_length) > MAX_FILE_SIZE:
-                            raise RuntimeError("The file exceeds 45 MB.")
+                            raise RuntimeError("Direct file exceeds 45 MB.")
                     except ValueError:
                         pass
 
-                url_path = urlparse(current_url).path
-                extension = Path(url_path).suffix.lower()
+                extension = Path(urlparse(current_url).path).suffix.lower()
 
                 allowed_extensions = (
                     IMAGE_EXTENSIONS
@@ -398,7 +427,7 @@ def download_direct_file(url, folder):
                 destination = folder / f"direct_media{extension}"
                 total = 0
 
-                with destination.open("wb") as file:
+                with destination.open("wb") as output:
                     for chunk in response.iter_content(
                         chunk_size=64 * 1024
                     ):
@@ -408,13 +437,19 @@ def download_direct_file(url, folder):
                         total += len(chunk)
 
                         if total > MAX_FILE_SIZE:
-                            raise RuntimeError("The file exceeds 45 MB.")
+                            raise RuntimeError("Direct file exceeds 45 MB.")
 
-                        file.write(chunk)
+                        output.write(chunk)
 
                 if total == 0:
                     destination.unlink(missing_ok=True)
-                    raise RuntimeError("The server returned an empty file.")
+                    raise RuntimeError("The direct file was empty.")
+
+                logger.info(
+                    "DIRECT SUCCESS | extension=%s | size=%s",
+                    destination.suffix,
+                    total,
+                )
 
                 return destination
 
@@ -424,33 +459,49 @@ def download_direct_file(url, folder):
     raise RuntimeError("Too many redirects.")
 
 
+# ============================================================
+# DOWNLOAD WITH REAL ERROR LOGGING
+# ============================================================
+
 def download_media(url, folder):
-    """Try a supported website extractor, then a direct file URL."""
+    """
+    Try yt-dlp first, then direct downloading.
+    Log both failures so the real cause is visible in Railway.
+    """
     validate_public_url(url)
+
+    ytdlp_error = None
 
     try:
         return download_with_ytdlp(url, folder)
 
-    except Exception as first_error:
-        logger.info(
-            "yt-dlp attempt failed: %s",
-            type(first_error).__name__,
+    except Exception as exc:
+        ytdlp_error = exc
+
+        logger.error(
+            "YTDLP FAILURE | type=%s | reason=%s",
+            type(exc).__name__,
+            str(exc)[:2000],
+            exc_info=True,
         )
 
-        clear_folder(folder)
+    clear_folder(folder)
 
-        try:
-            return download_direct_file(url, folder)
-        except Exception as second_error:
-            logger.warning(
-                "Direct download failed: %s",
-                type(second_error).__name__,
-            )
+    try:
+        return download_direct_file(url, folder)
 
-            raise RuntimeError(
-                "This link could not be downloaded. It may be private, "
-                "expired, unsupported, or restricted."
-            ) from second_error
+    except Exception as exc:
+        logger.error(
+            "DIRECT DOWNLOAD FAILURE | type=%s | reason=%s",
+            type(exc).__name__,
+            str(exc)[:2000],
+            exc_info=True,
+        )
+
+        raise RuntimeError(
+            "Both download methods failed. See YTDLP FAILURE and "
+            "DIRECT DOWNLOAD FAILURE in Railway logs."
+        ) from ytdlp_error
 
 
 # ============================================================
@@ -458,7 +509,7 @@ def download_media(url, folder):
 # ============================================================
 
 async def send_media(message, path, deadline):
-    """Send a suitable Telegram media type within the remaining time."""
+    """Send media in Telegram's appropriate format."""
     extension = path.suffix.lower()
     size = path.stat().st_size
 
@@ -483,8 +534,8 @@ async def send_media(message, path, deadline):
                     caption=caption,
                     read_timeout=remaining,
                     write_timeout=remaining,
-                    connect_timeout=min(10, remaining),
-                    pool_timeout=min(10, remaining),
+                    connect_timeout=min(8, remaining),
+                    pool_timeout=min(8, remaining),
                 )
             return
 
@@ -496,8 +547,8 @@ async def send_media(message, path, deadline):
                     caption=caption,
                     read_timeout=remaining,
                     write_timeout=remaining,
-                    connect_timeout=min(10, remaining),
-                    pool_timeout=min(10, remaining),
+                    connect_timeout=min(8, remaining),
+                    pool_timeout=min(8, remaining),
                 )
             return
 
@@ -510,8 +561,8 @@ async def send_media(message, path, deadline):
                     supports_streaming=True,
                     read_timeout=remaining,
                     write_timeout=remaining,
-                    connect_timeout=min(10, remaining),
-                    pool_timeout=min(10, remaining),
+                    connect_timeout=min(8, remaining),
+                    pool_timeout=min(8, remaining),
                 )
             return
 
@@ -527,29 +578,29 @@ async def send_media(message, path, deadline):
                 ),
                 read_timeout=remaining,
                 write_timeout=remaining,
-                connect_timeout=min(10, remaining),
-                pool_timeout=min(10, remaining),
+                connect_timeout=min(8, remaining),
+                pool_timeout=min(8, remaining),
             )
 
     await asyncio.wait_for(upload(), timeout=remaining)
 
 
 # ============================================================
-# COMMAND HANDLERS
+# COMMANDS
 # ============================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Intentionally silent.
+    # Intentionally no reply.
     return
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Intentionally silent.
+    # Intentionally no reply.
     return
 
 
 # ============================================================
-# MAIN MESSAGE HANDLER
+# MESSAGE HANDLER
 # ============================================================
 
 async def handle_message(
@@ -564,19 +615,19 @@ async def handle_message(
     text = message.text or message.caption or ""
     url = extract_url(text)
 
-    # Ignore normal messages and messages without a link.
+    # Ignore ordinary text and messages without URLs.
     if not url:
         return
 
-    started_at = time.monotonic()
-    deadline = started_at + PROCESS_TIMEOUT
+    started = time.monotonic()
+    deadline = started + PROCESS_TIMEOUT
 
     try:
         status = await message.reply_text(
             "🙏 Thanks for sharing! Your file is under process ⏳"
         )
     except Exception:
-        logger.exception("Could not send the processing message.")
+        logger.exception("Could not send processing acknowledgement.")
         return
 
     folder = Path(
@@ -610,14 +661,14 @@ async def handle_message(
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
-            # Python cannot forcibly stop a running worker thread.
-            # Wait for the worker to finish before deleting its files.
+            # A Python worker thread cannot be killed safely.
+            # Remove its directory after it actually finishes.
             cleanup_folder = False
 
-            def cleanup_when_finished(task):
+            def cleanup_after_worker(task):
                 shutil.rmtree(folder, ignore_errors=True)
 
-            download_task.add_done_callback(cleanup_when_finished)
+            download_task.add_done_callback(cleanup_after_worker)
             raise
 
         remaining = deadline - time.monotonic()
@@ -638,36 +689,51 @@ async def handle_message(
             pass
 
         logger.info(
-            "Request completed in %.1f seconds.",
-            time.monotonic() - started_at,
+            "REQUEST SUCCESS | duration=%.1fs",
+            time.monotonic() - started,
         )
 
     except asyncio.TimeoutError:
-        logger.warning(
-            "Request exceeded the %s-second processing deadline.",
-            PROCESS_TIMEOUT,
-        )
+        logger.warning("REQUEST TIMEOUT | deadline=%s seconds", PROCESS_TIMEOUT)
 
         try:
             await status.edit_text(
                 "⏱️ Processing exceeded 120 seconds.\n"
-                "Please try again with a smaller file or a faster link."
+                "Please try a smaller file or another link."
             )
         except Exception:
             pass
 
     except Exception as exc:
-        logger.warning(
-            "Request failed: %s: %s",
+        logger.error(
+            "REQUEST FAILURE | type=%s | reason=%s",
             type(exc).__name__,
-            str(exc)[:300],
+            str(exc)[:1500],
+            exc_info=True,
         )
+
+        # Show the category, but avoid sending sensitive internal details.
+        detail = str(exc).lower()
+
+        if "sign in" in detail or "cookies" in detail or "login" in detail:
+            reason = "The website may require valid login cookies."
+        elif "too large" in detail or "45 mb" in detail:
+            reason = "The file may exceed the 45 MB limit."
+        elif "hostname" in detail or "resolve" in detail:
+            reason = "The server could not resolve the link's hostname."
+        elif "timed out" in detail or "timeout" in detail:
+            reason = "The website took too long to respond."
+        else:
+            reason = (
+                "The link may be restricted, expired, unsupported, "
+                "or blocked by the hosting provider."
+            )
 
         try:
             await status.edit_text(
                 "❌ Unable to download this link.\n\n"
-                "The file may be private, expired, unsupported, restricted, "
-                "or larger than 45 MB."
+                f"Possible reason: {reason}\n\n"
+                "The detailed error has been recorded in Railway logs."
             )
         except Exception:
             pass
@@ -678,32 +744,30 @@ async def handle_message(
 
 
 # ============================================================
-# ERROR HANDLER
+# APPLICATION ERROR HANDLER
 # ============================================================
 
 async def handle_error(update, context):
-    error = context.error
-
-    if error:
+    if context.error:
         logger.error(
-            "Unhandled application error: %s",
-            error,
+            "TELEGRAM APPLICATION ERROR: %s",
+            context.error,
             exc_info=(
-                type(error),
-                error,
-                error.__traceback__,
+                type(context.error),
+                context.error,
+                context.error.__traceback__,
             ),
         )
 
 
 # ============================================================
-# START BOT
+# MAIN
 # ============================================================
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN is missing. Add BOT_TOKEN in Railway Variables."
+            "BOT_TOKEN is missing. Add it in Railway Variables."
         )
 
     app = (
