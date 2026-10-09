@@ -604,50 +604,32 @@ def direct_download(
 # YT-DLP OPTIONS
 # ============================================================
 
+
 def build_ydl_options(
     url: str,
     platform: str,
     output_dir: Path,
 ):
-
-    cookie_file = create_cookie_file(
-        platform
-    )
+    cookie_file = create_cookie_file(platform)
 
     options = {
-
         "outtmpl": str(
             output_dir
             / "Downloaded_Media_%(autonumber)03d.%(ext)s"
         ),
 
-        # Prefer video + audio.
-        "format": (
-            "bestvideo*+bestaudio/best"
-        ),
-
+        "format": "bestvideo*+bestaudio/best",
         "merge_output_format": "mp4",
-
         "noplaylist": True,
-
         "playlistend": MAX_PLAYLIST_ITEMS,
-
         "quiet": True,
-
         "no_warnings": False,
-
         "retries": 3,
-
         "fragment_retries": 3,
-
         "file_access_retries": 3,
-
         "socket_timeout": 30,
-
         "continuedl": True,
-
         "overwrites": True,
-
         "max_filesize": MAX_FILE_SIZE,
 
         "http_headers": {
@@ -656,25 +638,33 @@ def build_ydl_options(
         },
 
         "writethumbnail": False,
-
         "writeinfojson": False,
-
         "writesubtitles": False,
-
         "writeautomaticsub": False,
-
         "restrictfilenames": True,
-
         "postprocessors": [],
     }
 
+    # Use cookies configured in Railway Variables.
     if cookie_file:
+        options["cookiefile"] = cookie_file
+        logger.info("Cookies loaded for platform: %s", platform)
+    elif platform == "youtube":
+        logger.warning(
+            "YouTube cookies are missing. "
+            "Check the YOUTUBE_COOKIES_B64 Railway variable."
+        )
 
-        options[
-            "cookiefile"
-        ] = cookie_file
+    # Optional YouTube player client configuration.
+    if platform == "youtube":
+        options["extractor_args"] = {
+            "youtube": {
+                "player_client": ["tv", "web_safari"],
+            }
+        }
 
     return options
+
 
 
 # ============================================================
