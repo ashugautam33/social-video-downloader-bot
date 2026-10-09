@@ -1,0 +1,9 @@
+
+{
+  "name": "telegram-media-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
