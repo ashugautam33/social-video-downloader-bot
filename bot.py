@@ -96,7 +96,7 @@ def extract_url(text):
     if not match:
         return None
 
-    return match.group(0).rstrip(".,!?)\]}>'\"")
+    return match.group(0).rstrip(".,!?)]}>'\"")
 
 
 def validate_public_url(url):
