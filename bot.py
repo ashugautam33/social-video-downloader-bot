@@ -502,9 +502,58 @@ def create_cookie_file(host, folder):
 
 
 
+
 # ============================================================
 # YT-DLP DOWNLOAD
 # ============================================================
+
+class SafeExtensionYoutubeDL(yt_dlp.YoutubeDL):
+    """Normalize unusual Snapchat extension metadata when possible."""
+
+    def process_ie_result(self, ie_result, download=True, extra_info=None):
+        if isinstance(ie_result, dict):
+            source_url = (
+                ie_result.get("webpage_url")
+                or ie_result.get("original_url")
+                or ie_result.get("url")
+                or ""
+            )
+            source_host = (urlparse(source_url).hostname or "").lower()
+
+            is_snapchat = (
+                source_host == "snapchat.com"
+                or source_host.endswith(".snapchat.com")
+            )
+
+            if is_snapchat:
+                allowed_extensions = {
+                    "mp4", "m4v", "mov", "webm", "mkv", "m3u8", "mpd"
+                }
+
+                formats = ie_result.get("formats")
+                if isinstance(formats, list):
+                    for fmt in formats:
+                        if not isinstance(fmt, dict):
+                            continue
+
+                        ext = str(fmt.get("ext") or "").lower()
+                        if ext and ext not in allowed_extensions:
+                            log.warning(
+                                "Snapchat returned unusual extension metadata; "
+                                "normalizing metadata to mp4."
+                            )
+                            fmt["ext"] = "mp4"
+
+                ext = str(ie_result.get("ext") or "").lower()
+                if ext and ext not in allowed_extensions:
+                    ie_result["ext"] = "mp4"
+
+        return super().process_ie_result(
+            ie_result,
+            download=download,
+            extra_info=extra_info,
+        )
+
 
 def ytdlp_download(url, folder):
     """Download media from sites supported by yt-dlp."""
@@ -523,7 +572,7 @@ def ytdlp_download(url, folder):
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,
         "retries": 3,
         "fragment_retries": 3,
         "extractor_retries": 2,
@@ -538,12 +587,6 @@ def ytdlp_download(url, folder):
         options["cookiefile"] = str(cookie_file)
         log.info("yt-dlp will use cookie file at %s", cookie_file)
 
-    elif host == "instagram.com" or host.endswith(".instagram.com"):
-        log.error(
-            "yt-dlp is running without Instagram cookies; "
-            "check Railway Volume /data/cookies.txt"
-        )
-
     selectors = [
         "bestvideo*+bestaudio/best",
         "best[height<=720]/best",
@@ -556,7 +599,7 @@ def ytdlp_download(url, folder):
         attempt_options["format"] = selector
 
         try:
-            with yt_dlp.YoutubeDL(attempt_options) as ydl:
+            with SafeExtensionYoutubeDL(attempt_options) as ydl:
                 info = ydl.extract_info(url, download=True)
 
             candidates = []
@@ -564,19 +607,14 @@ def ytdlp_download(url, folder):
             for path in folder.rglob("*"):
                 if not path.is_file():
                     continue
-
                 if str(path.resolve()) in existing_files:
                     continue
-
                 if path.suffix.lower() not in MEDIA_EXTENSIONS:
                     continue
-
                 if path.name.endswith((".part", ".ytdl")):
                     continue
-
                 if path.name == "cookies.txt":
                     continue
-
                 if path.stat().st_size <= 0:
                     continue
 
@@ -612,6 +650,7 @@ def ytdlp_download(url, folder):
         "yt-dlp could not download this media. "
         + " | ".join(errors[-2:])
     )
+
 
 
 # ============================================================
