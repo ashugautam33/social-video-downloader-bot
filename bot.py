@@ -489,11 +489,14 @@ def ytdlp_download(url, folder):
 # INSTAGRAM GALLERY FALLBACK
 # ============================================================
 
+
 def instagram_gallery_download(url, folder):
-    """Try gallery-dl for accessible Instagram photo/carousel posts."""
+    """Download accessible Instagram photos and carousels using cookies."""
 
     output_folder = folder / "instagram_gallery"
     output_folder.mkdir(parents=True, exist_ok=True)
+
+    cookie_file = create_cookie_file("instagram.com", folder)
 
     command = [
         sys.executable,
@@ -501,8 +504,16 @@ def instagram_gallery_download(url, folder):
         "gallery_dl",
         "-D",
         str(output_folder),
-        url,
     ]
+
+    if cookie_file and Path(cookie_file).is_file():
+        command.extend(["--cookies", str(cookie_file)])
+    else:
+        log.warning(
+            "Instagram cookies not configured; login redirects may occur."
+        )
+
+    command.append(url)
 
     try:
         result = subprocess.run(
@@ -513,7 +524,7 @@ def instagram_gallery_download(url, folder):
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("gallery-dl timed out.") from exc
+        raise RuntimeError("Instagram gallery download timed out.") from exc
 
     allowed = {
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
@@ -529,15 +540,24 @@ def instagram_gallery_download(url, folder):
     ]
 
     if not files:
-        details = result.stderr or result.stdout or (
-            f"gallery-dl exited with status {result.returncode}."
+        details = (
+            result.stderr or result.stdout
+            or f"gallery-dl exited with status {result.returncode}."
         )
-        raise RuntimeError(details[-1000:])
+
+        if "login" in details.lower() or "cookies" in details.lower():
+            raise RuntimeError(
+                "Instagram requires a valid login session. "
+                "Check INSTAGRAM_COOKIES_B64 and export fresh cookies."
+            )
+
+        raise RuntimeError(details[-1200:])
 
     files.sort(key=lambda path: str(path))
     files = files[:MAX_CAROUSEL_FILES]
 
     return files, "Instagram media"
+
 
 
 # ============================================================
