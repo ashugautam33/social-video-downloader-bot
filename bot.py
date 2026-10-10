@@ -335,42 +335,116 @@ def cookie_environment(host):
     return "COOKIES_B64"
 
 
+
 def create_cookie_file(host, folder):
     """
-    Decode an optional Base64 Netscape-format cookie file.
-
-    An optional cookies.txt at the project root is also supported.
+    Load cookies from Railway environment variables.
+    Fall back to local cookies.txt only if no variable is configured.
+    Never log cookie contents.
     """
-
-    root_cookie_file = Path("cookies.txt")
-
-    if root_cookie_file.is_file() and root_cookie_file.stat().st_size > 0:
-        return root_cookie_file.resolve()
-
+    host = (host or "").lower()
     variable = cookie_environment(host)
     encoded = os.getenv(variable, "").strip()
 
-    if not encoded:
-        return None
+    # Prefer Railway environment cookies when configured.
+    if encoded:
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
 
-    try:
-        decoded = base64.b64decode(encoded, validate=True)
+            if not decoded.strip():
+                raise ValueError("Cookie file is empty.")
 
-        if not decoded.strip():
-            raise ValueError("Cookie file is empty.")
+            # Check Instagram's session cookie only for Instagram.
+            is_instagram = (
+                host == "instagram.com"
+                or host.endswith(".instagram.com")
+            )
 
-        cookie_path = folder / "cookies.txt"
-        cookie_path.write_bytes(decoded)
+            if is_instagram:
+                text = decoded.decode("utf-8-sig", errors="strict")
+                has_session = False
 
-        return cookie_path
+                for line in text.splitlines():
+                    # Netscape format can use #HttpOnly_ on cookie rows.
+                    if line.startswith("#HttpOnly_"):
+                        line = line[len("#HttpOnly_"):]
 
-    except Exception as exc:
-        log.warning(
-            "Unable to decode %s: %s",
-            variable,
-            str(exc)[:300],
-        )
-        return None
+                    if not line or line.startswith("#"):
+                        continue
+
+                    fields = line.split("\t")
+
+                    if (
+                        len(fields) >= 7
+                        and fields[5] == "sessionid"
+                        and fields[6].strip()
+                    ):
+                        has_session = True
+                        break
+
+                if not has_session:
+                    raise ValueError(
+                        "Instagram sessionid cookie is missing. "
+                        "Export a fresh Netscape-format cookies.txt "
+                        "from your own logged-in Instagram session."
+                    )
+
+            cookie_path = Path(folder) / "cookies.txt"
+            cookie_path.write_bytes(decoded)
+
+            log.info("Loaded cookies from %s", variable)
+            return cookie_path
+
+        except Exception as exc:
+            # Never log the cookie data itself.
+            log.warning(
+                "Could not load %s: %s",
+                variable,
+                str(exc)[:250],
+            )
+            return None
+
+    # Use local cookies.txt only if the environment variable is absent.
+    local_cookie = Path("cookies.txt")
+
+    if local_cookie.is_file() and local_cookie.stat().st_size > 0:
+        if (
+            host == "instagram.com"
+            or host.endswith(".instagram.com")
+        ):
+            try:
+                text = local_cookie.read_text(
+                    encoding="utf-8-sig"
+                )
+                has_session = any(
+                    len(
+                        line.removeprefix("#HttpOnly_").split("\t")
+                    ) >= 7
+                    and line.removeprefix("#HttpOnly_").split("\t")[5]
+                    == "sessionid"
+                    and line.removeprefix("#HttpOnly_").split("\t")[6].strip()
+                    for line in text.splitlines()
+                    if line and (
+                        not line.startswith("#")
+                        or line.startswith("#HttpOnly_")
+                    )
+                )
+
+                if not has_session:
+                    log.warning(
+                        "Local cookies.txt has no Instagram sessionid."
+                    )
+                    return None
+
+            except Exception:
+                log.warning("Could not validate local Instagram cookies.")
+                return None
+
+        log.info("Using local cookies.txt")
+        return local_cookie.resolve()
+
+    log.warning("No cookies configured for %s.", host)
+    return None
 
 
 # ============================================================
