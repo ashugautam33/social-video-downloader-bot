@@ -100,7 +100,7 @@ def extract_url(text):
 
 
 def validate_public_url(url):
-    """Reject local/private network destinations."""
+    """Validate URLs and reject local/private network addresses."""
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
@@ -178,7 +178,7 @@ def safe_stream_request(url):
 # ============================================================
 
 def detect_extension(url, content_type=None, disposition=None):
-    """Find a filename extension from headers or URL."""
+    """Detect file extension from headers or URL."""
     if disposition:
         match = re.search(
             r'filename\*?=(?:UTF-8\'\')?"?([^";]+)',
@@ -210,7 +210,7 @@ def detect_extension(url, content_type=None, disposition=None):
 
 
 def download_direct_file(url, folder):
-    """Download a direct file URL. Return None for HTML pages."""
+    """Download a direct file URL; return None for HTML pages."""
     response = safe_stream_request(url)
 
     try:
@@ -276,10 +276,7 @@ def download_direct_file(url, folder):
         if (
             header.startswith(b"<!doctype html")
             or header.startswith(b"<html")
-            or (
-                header.startswith(b"{")
-                and "json" in content_type
-            )
+            or (header.startswith(b"{") and "json" in content_type)
         ):
             destination.unlink(missing_ok=True)
             return None
@@ -291,11 +288,11 @@ def download_direct_file(url, folder):
 
 
 # ============================================================
-# COOKIE MANAGEMENT
+# COOKIES
 # ============================================================
 
 def cookie_environment(host):
-    """Return the environment variable associated with a platform."""
+    """Return the cookie environment variable for a platform."""
     host = (host or "").lower()
 
     mappings = [
@@ -320,77 +317,67 @@ def cookie_environment(host):
 
 
 def create_cookie_file(host, folder):
-    """
-    Cookie priority for Instagram:
-    1. INSTAGRAM_COOKIES_PATH
-    2. /data/cookies.txt on Railway Volume
-    3. INSTAGRAM_COOKIES_B64
-    4. Local cookies.txt
-    """
+    """Locate a configured cookie file without exposing its contents."""
     host = (host or "").lower()
     folder = Path(folder)
-
     is_instagram = (
-        host == "instagram.com"
-        or host.endswith(".instagram.com")
+        host == "instagram.com" or host.endswith(".instagram.com")
     )
 
-    def valid_cookie_file(path):
+    def inspect_cookie_file(path):
         path = Path(path)
 
         if not path.is_file() or path.stat().st_size == 0:
-            return False
-
-        if not is_instagram:
-            return True
+            return False, False
 
         try:
             with path.open(
-                "r",
-                encoding="utf-8-sig",
-                errors="strict",
-            ) as handle:
-                for line in handle:
-                    if line.startswith("#HttpOnly_"):
-                        line = line[len("#HttpOnly_"):]
-
-                    if not line or line.startswith("#"):
-                        continue
-
-                    fields = line.rstrip("\r\n").split("\t")
-
-                    if (
-                        len(fields) >= 7
-                        and fields[5] == "sessionid"
-                        and fields[6].strip()
-                    ):
-                        return True
-
+                "r", encoding="utf-8-sig", errors="strict"
+            ) as fh:
+                lines = fh.read().splitlines()
         except (OSError, UnicodeError):
-            return False
+            return False, False
 
-        return False
+        header_ok = any(
+            line.strip() in (
+                "# Netscape HTTP Cookie File",
+                "# HTTP Cookie File",
+            )
+            for line in lines[:5]
+        )
+
+        has_session = False
+
+        for line in lines:
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+
+            if not line or line.startswith("#"):
+                continue
+
+            fields = line.split("\t")
+
+            if (
+                len(fields) >= 7
+                and fields[5] == "sessionid"
+                and fields[6].strip()
+            ):
+                has_session = True
+                break
+
+        return header_ok, has_session
+
+    candidates = []
 
     configured_path = os.getenv(
-        "INSTAGRAM_COOKIES_PATH",
-        "",
+        "INSTAGRAM_COOKIES_PATH", ""
     ).strip()
 
     if is_instagram and configured_path:
-        candidate = Path(configured_path)
-
-        if valid_cookie_file(candidate):
-            log.info("Loaded Instagram cookies from configured path.")
-            return candidate.resolve()
-
-        log.warning("INSTAGRAM_COOKIES_PATH is missing or invalid.")
+        candidates.append(Path(configured_path))
 
     if is_instagram:
-        volume_cookie = Path("/data/cookies.txt")
-
-        if valid_cookie_file(volume_cookie):
-            log.info("Loaded Instagram cookies from Railway Volume.")
-            return volume_cookie
+        candidates.append(Path("/data/cookies.txt"))
 
     variable = cookie_environment(host)
     encoded = os.getenv(variable, "").strip()
@@ -398,57 +385,59 @@ def create_cookie_file(host, folder):
     if encoded:
         try:
             decoded = base64.b64decode(encoded, validate=True)
-
-            if not decoded.strip():
-                raise ValueError("Cookie file is empty.")
-
-            if is_instagram:
-                text = decoded.decode("utf-8-sig", errors="strict")
-                has_session = False
-
-                for line in text.splitlines():
-                    if line.startswith("#HttpOnly_"):
-                        line = line[len("#HttpOnly_"):]
-
-                    if not line or line.startswith("#"):
-                        continue
-
-                    fields = line.split("\t")
-
-                    if (
-                        len(fields) >= 7
-                        and fields[5] == "sessionid"
-                        and fields[6].strip()
-                    ):
-                        has_session = True
-                        break
-
-                if not has_session:
-                    raise ValueError(
-                        "Instagram sessionid cookie is missing."
-                    )
-
-            cookie_path = folder / f"{variable.lower()}_cookies.txt"
-            cookie_path.write_bytes(decoded)
-
-            log.info("Loaded cookies from %s.", variable)
-            return cookie_path
-
-        except Exception as exc:
+            candidate = folder / f"{variable.lower()}_cookies.txt"
+            candidate.write_bytes(decoded)
+            candidates.append(candidate)
+        except Exception:
             log.warning(
-                "Could not load %s: %s",
+                "Cookie environment variable %s could not be decoded.",
                 variable,
-                str(exc)[:200],
             )
 
-    local_cookie = Path("cookies.txt")
+    candidates.append(Path("cookies.txt"))
+    visited = set()
 
-    if valid_cookie_file(local_cookie):
-        log.info("Using local cookies.txt.")
-        return local_cookie.resolve()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+
+        if key in visited:
+            continue
+
+        visited.add(key)
+        valid_format, has_session = inspect_cookie_file(candidate)
+
+        if not valid_format:
+            if candidate.exists():
+                log.warning(
+                    "Cookie file is not valid Netscape format: %s",
+                    candidate,
+                )
+            continue
+
+        if is_instagram and not has_session:
+            log.warning(
+                "Instagram cookie file has no sessionid: %s",
+                candidate,
+            )
+            continue
+
+        log.info(
+            "Cookie file selected: %s; format_ok=True; "
+            "sessionid_present=%s",
+            candidate,
+            has_session,
+        )
+
+        return candidate.resolve()
 
     if is_instagram:
-        log.warning("No valid Instagram cookies found. Check /data/cookies.txt.")
+        log.error(
+            "No usable Instagram cookies found. "
+            "Expected /data/cookies.txt in Netscape format."
+        )
 
     return None
 
@@ -470,9 +459,7 @@ def ytdlp_download(url, folder):
     cookie_file = create_cookie_file(host, folder)
 
     options = {
-        "outtmpl": str(
-            folder / "%(title).80B [%(id)s].%(ext)s"
-        ),
+        "outtmpl": str(folder / "%(title).80B [%(id)s].%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -489,6 +476,12 @@ def ytdlp_download(url, folder):
 
     if cookie_file and Path(cookie_file).is_file():
         options["cookiefile"] = str(cookie_file)
+        log.info("yt-dlp will use a cookie file.")
+    elif host == "instagram.com" or host.endswith(".instagram.com"):
+        log.error(
+            "yt-dlp is running without Instagram cookies; "
+            "check /data/cookies.txt."
+        )
 
     selectors = [
         "bestvideo*+bestaudio/best",
@@ -565,7 +558,7 @@ def ytdlp_download(url, folder):
 # ============================================================
 
 def instagram_gallery_download(url, folder):
-    """Download accessible Instagram media using gallery-dl and cookies."""
+    """Try gallery-dl for accessible Instagram media."""
     output_folder = Path(folder) / "instagram_gallery"
     output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -593,7 +586,9 @@ def instagram_gallery_download(url, folder):
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Instagram gallery download timed out.") from exc
+        raise RuntimeError(
+            "Instagram gallery download timed out."
+        ) from exc
 
     allowed = {
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
@@ -601,7 +596,8 @@ def instagram_gallery_download(url, folder):
     }
 
     files = [
-        path for path in output_folder.rglob("*")
+        path
+        for path in output_folder.rglob("*")
         if path.is_file()
         and path.suffix.lower() in allowed
         and path.stat().st_size > 0
@@ -619,9 +615,9 @@ def instagram_gallery_download(url, folder):
         for word in ("login", "cookies", "authentication", "no results")
     ):
         raise RuntimeError(
-            "gallery-dl could not access this Story/post. Confirm "
-            "/data/cookies.txt is a fresh Netscape-format cookie export "
-            "and that the logged-in account is allowed to view this Story. "
+            "gallery-dl could not access this Story/post. "
+            "Check /data/cookies.txt and confirm the account is "
+            "authorized to view the media. "
             + details[-500:]
         )
 
@@ -635,12 +631,8 @@ def instagram_gallery_download(url, folder):
     )
 
 
-# ============================================================
-# INSTAGRAM STORY HANDLER
-# ============================================================
-
 def instagram_story_download(url, folder):
-    """Handle Instagram Story URLs separately using yt-dlp."""
+    """Route Story URLs through yt-dlp."""
     host = (urlparse(url).hostname or "").lower()
 
     if not (
@@ -653,11 +645,11 @@ def instagram_story_download(url, folder):
 
 
 # ============================================================
-# INSTAGRAM INSTALOADER FALLBACK
+# INSTALOADER FALLBACK FOR POSTS/REELS
 # ============================================================
 
 def instagram_instaloader_download(url, folder):
-    """Try Instaloader for accessible Instagram posts."""
+    """Try Instaloader for accessible Instagram posts and reels."""
     match = re.search(
         r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
         url,
@@ -665,10 +657,7 @@ def instagram_instaloader_download(url, folder):
     )
 
     if not match:
-        raise RuntimeError(
-            "This is not a supported Instagram post URL. "
-            "Story URLs are handled separately."
-        )
+        raise RuntimeError("Could not identify the Instagram post ID.")
 
     loader = instaloader.Instaloader(
         download_pictures=False,
@@ -760,6 +749,7 @@ def download_media(url, folder):
     gallery_error = None
     instaloader_error = None
 
+    # 1. Direct file URL.
     try:
         direct_file = download_direct_file(url, folder)
 
@@ -774,38 +764,7 @@ def download_media(url, folder):
             direct_error[:300],
         )
 
-    is_instagram = (
-        host == "instagram.com"
-        or host.endswith(".instagram.com")
-    )
-    is_story_url = (
-        is_instagram
-        and "/stories/" in urlparse(url).path.lower()
-    )
-
-    # Story links should not be sent to Instaloader's post parser.
-    if is_story_url:
-        try:
-            return instagram_story_download(url, folder)
-        except Exception as exc:
-            ytdlp_error = str(exc)
-            log.warning("Instagram Story download failed: %s", ytdlp_error[:500])
-
-        try:
-            return instagram_gallery_download(url, folder)
-        except Exception as exc:
-            gallery_error = str(exc)
-            log.warning("Instagram Story gallery fallback failed: %s", gallery_error[:500])
-
-        raise RuntimeError(
-            "Instagram Story download failed.\n"
-            f"yt-dlp: {ytdlp_error or 'No error recorded'}\n"
-            f"gallery-dl: {gallery_error or 'No error recorded'}\n"
-            "Verify that /data/cookies.txt contains fresh cookies from "
-            "an account authorized to view this Story. The Story may also "
-            "be expired, deleted, or otherwise unavailable."
-        )
-
+    # 2. yt-dlp.
     try:
         return ytdlp_download(url, folder)
 
@@ -817,7 +776,25 @@ def download_media(url, folder):
             ytdlp_error[:500],
         )
 
-    if is_instagram:
+    # 3. Instagram fallback.
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        is_story_url = "/stories/" in urlparse(url).path.lower()
+
+        if is_story_url:
+            try:
+                return instagram_gallery_download(url, folder)
+            except Exception as exc:
+                gallery_error = str(exc)
+
+            raise RuntimeError(
+                "Instagram Story download failed.\n"
+                f"yt-dlp: {ytdlp_error or 'No extractor error recorded'}\n"
+                f"gallery-dl: {gallery_error or 'No gallery error recorded'}\n"
+                "Confirm /data/cookies.txt contains current cookies "
+                "from an account allowed to view this Story. The Story "
+                "may also be expired, deleted, or restricted."
+            )
+
         try:
             return instagram_gallery_download(url, folder)
 
@@ -926,9 +903,9 @@ async def start_command(
         "🔗 Send a supported media link.\n\n"
         "Supported platforms include:\n"
         "• YouTube videos and Shorts\n"
-        "• Instagram posts, Reels, Stories, and carousels\n"
+        "• Instagram posts, Reels, Stories and supported carousels\n"
         "• Facebook and TikTok\n"
-        "• X/Twitter, Reddit, and Pinterest\n"
+        "• X/Twitter, Reddit and Pinterest\n"
         "• Other yt-dlp-supported sites\n"
         "• Direct downloadable files\n\n"
         f"📦 Download limit: {MAX_DOWNLOAD_MB} MB\n"
@@ -951,9 +928,9 @@ async def help_command(
         "3. Wait for the download to finish.\n"
         "4. Receive the file in Telegram.\n\n"
         "Important:\n"
-        "• Private, deleted, restricted, or login-protected content "
+        "• Private, deleted, restricted or login-protected content "
         "may not be available.\n"
-        "• Some platforms may temporarily fail.\n"
+        "• Platforms can change and temporarily break downloads.\n"
         "• Instagram cookies expire and may need refreshing.\n"
         "• Only download content you are authorized to access."
     )
@@ -1028,7 +1005,10 @@ async def handle_url(
                     continue
 
                 if path.stat().st_size > MAX_UPLOAD_BYTES:
-                    log.warning("Skipping oversized file: %s", path.name)
+                    log.warning(
+                        "Skipping oversized file: %s",
+                        path.name,
+                    )
                     continue
 
                 deliverable.append(path)
@@ -1064,7 +1044,7 @@ async def handle_url(
         if len(error_text) > 2000:
             error_text = error_text[:2000] + "..."
 
-        error_message = (
+        message = (
             "❌ Download failed.\n\n"
             f"Platform: {host}\n"
             f"Reason: {error_text}\n\n"
@@ -1072,9 +1052,9 @@ async def handle_url(
         )
 
         try:
-            await status.edit_text(error_message)
+            await status.edit_text(message)
         except Exception:
-            await update.message.reply_text(error_message)
+            await update.message.reply_text(message)
 
 
 # ============================================================
