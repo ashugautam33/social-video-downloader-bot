@@ -354,8 +354,9 @@ def cookie_environment(host):
     return "COOKIES_B64"
 
 
+
 def create_cookie_file(host, folder):
-    """Find a configured cookie file without logging its contents."""
+    """Find a valid Netscape cookie file without exposing its contents."""
     host = (host or "").lower()
     folder = Path(folder)
 
@@ -380,15 +381,15 @@ def create_cookie_file(host, folder):
         except (OSError, UnicodeError):
             return False, False
 
-        header_ok = any(
+        valid_header = any(
             line.strip() in (
                 "# Netscape HTTP Cookie File",
                 "# HTTP Cookie File",
             )
-            for line in lines[:5]
+            for line in lines[:10]
         )
 
-        has_session = False
+        has_sessionid = False
 
         for line in lines:
             if line.startswith("#HttpOnly_"):
@@ -404,13 +405,14 @@ def create_cookie_file(host, folder):
                 and fields[5] == "sessionid"
                 and fields[6].strip()
             ):
-                has_session = True
+                has_sessionid = True
                 break
 
-        return header_ok, has_session
+        return valid_header, has_sessionid
 
     candidates = []
 
+    # Explicitly configured cookie path.
     configured_path = os.getenv(
         "INSTAGRAM_COOKIES_PATH", ""
     ).strip()
@@ -418,40 +420,56 @@ def create_cookie_file(host, folder):
     if is_instagram and configured_path:
         candidates.append(Path(configured_path))
 
+    # Persistent Railway Volume and common alternative locations.
     if is_instagram:
-        candidates.append(Path("/data/cookies.txt"))
+        candidates.extend([
+            Path("/data/cookies.txt"),
+            Path("/app/cookies.txt"),
+            Path("/app/data/cookies.txt"),
+        ])
 
+    # Optional Base64 cookie file.
     variable = cookie_environment(host)
     encoded = os.getenv(variable, "").strip()
 
     if encoded:
         try:
-            decoded = base64.b64decode(encoded, validate=True)
-            candidate = folder / f"{variable.lower()}_cookies.txt"
-            candidate.write_bytes(decoded)
-            candidates.append(candidate)
+            normalized = encoded.replace("-", "+").replace("_", "/")
+            normalized += "=" * ((4 - len(normalized) % 4) % 4)
+
+            decoded = base64.b64decode(
+                normalized,
+                validate=True,
+            )
+
+            generated_file = folder / "environment_cookies.txt"
+            generated_file.write_bytes(decoded)
+            candidates.append(generated_file)
+
         except Exception:
             log.warning(
-                "Cookie environment variable %s could not be decoded.",
+                "%s could not be decoded. Use a cookie file instead.",
                 variable,
             )
 
     candidates.append(Path("cookies.txt"))
-    visited = set()
+
+    checked = set()
 
     for candidate in candidates:
         try:
-            key = str(candidate.resolve())
+            candidate = candidate.resolve()
         except OSError:
-            key = str(candidate)
+            pass
 
-        if key in visited:
+        if str(candidate) in checked:
             continue
 
-        visited.add(key)
-        valid_format, has_session = inspect_cookie_file(candidate)
+        checked.add(str(candidate))
 
-        if not valid_format:
+        valid_header, has_sessionid = inspect_cookie_file(candidate)
+
+        if not valid_header:
             if candidate.exists():
                 log.warning(
                     "Cookie file exists but is not valid Netscape format: %s",
@@ -459,9 +477,9 @@ def create_cookie_file(host, folder):
                 )
             continue
 
-        if is_instagram and not has_session:
+        if is_instagram and not has_sessionid:
             log.warning(
-                "Instagram cookie file has no sessionid cookie: %s",
+                "Instagram cookie file has no non-empty sessionid cookie: %s",
                 candidate,
             )
             continue
@@ -469,18 +487,19 @@ def create_cookie_file(host, folder):
         log.info(
             "Cookie file selected: %s; format_ok=True; sessionid_present=%s",
             candidate,
-            has_session,
+            has_sessionid,
         )
 
-        return candidate.resolve()
+        return candidate
 
     if is_instagram:
         log.error(
-            "No usable Instagram cookies found. "
-            "Expected /data/cookies.txt in Netscape format with sessionid."
+            "No usable Instagram cookie file found. "
+            "Expected /data/cookies.txt in Netscape format."
         )
 
     return None
+
 
 
 # ============================================================
@@ -659,24 +678,79 @@ def run_gallery_dl(url, folder, output_name, platform_label):
     )
 
 
-def instagram_gallery_download(url, folder):
-    """Fallback for accessible Instagram posts and Stories."""
-    try:
-        return run_gallery_dl(
-            url,
-            folder,
-            "instagram_gallery",
-            "Instagram",
-        )
-    except Exception as exc:
-        message = str(exc)
 
+def instagram_gallery_download(url, folder):
+    """Try gallery-dl for Instagram media accessible to the account."""
+    output_folder = Path(folder) / "instagram_gallery"
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    cookie_file = create_cookie_file(
+        "www.instagram.com",
+        folder,
+    )
+
+    command = [
+        sys.executable,
+        "-m",
+        "gallery_dl",
+        "--directory",
+        str(output_folder),
+    ]
+
+    if cookie_file and cookie_file.is_file():
+        command.extend(["--cookies", str(cookie_file)])
+        log.info("gallery-dl will use the configured cookie file.")
+    else:
+        log.error(
+            "gallery-dl has no Instagram cookie file. "
+            "Check /data/cookies.txt."
+        )
+
+    command.append(url)
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            "Instagram gallery download failed. Confirm that "
-            "/data/cookies.txt is a current Netscape-format cookie export "
-            "and that the logged-in account can view this content. "
-            + message[-700:]
+            "Instagram gallery download timed out."
         ) from exc
+
+    allowed_extensions = {
+        ".jpg", ".jpeg", ".png", ".webp",
+        ".gif", ".mp4", ".m4v", ".mov",
+    }
+
+    files = [
+        path
+        for path in output_folder.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in allowed_extensions
+        and path.stat().st_size > 0
+    ]
+
+    files.sort(key=lambda path: str(path))
+
+    if files:
+        return files[:MAX_CAROUSEL_FILES], "Instagram media"
+
+    details = (result.stderr or result.stdout or "").strip()
+
+    raise RuntimeError(
+        "gallery-dl could not retrieve Instagram media. "
+        "Check whether the cookie session is valid and authorized "
+        "to view this Story. "
+        + (
+            details[-700:]
+            if details
+            else f"Exit code: {result.returncode}"
+        )
+    )
 
 
 def gallery_dl_download(url, folder, platform_label="this platform"):
