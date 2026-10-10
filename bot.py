@@ -28,7 +28,6 @@ from telegram.ext import (
     filters,
 )
 
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -51,12 +50,10 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-# Avoid logging HTTP request URLs that may contain credentials.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 log = logging.getLogger("media_downloader")
-
 
 # ============================================================
 # FILE TYPES
@@ -81,14 +78,12 @@ AUDIO_EXTENSIONS = {
     ".mp3", ".m4a", ".opus", ".ogg", ".wav", ".flac",
 }
 
-
 # ============================================================
 # URL HELPERS
 # ============================================================
 
 def extract_url(text):
     """Extract the first HTTP or HTTPS URL from a message."""
-
     if not text:
         return None
 
@@ -105,11 +100,7 @@ def extract_url(text):
 
 
 def validate_public_url(url):
-    """
-    Validate the URL and reject local/private network destinations.
-    This is a basic SSRF safeguard, not a complete DNS-rebinding defense.
-    """
-
+    """Reject local/private network destinations."""
     parsed = urlparse(url)
 
     if parsed.scheme not in ("http", "https"):
@@ -147,8 +138,7 @@ def validate_public_url(url):
 
 
 def safe_stream_request(url):
-    """Download direct files while validating every redirect."""
-
+    """Download direct files while validating redirects."""
     current_url = url
 
     for _ in range(MAX_REDIRECTS + 1):
@@ -188,8 +178,7 @@ def safe_stream_request(url):
 # ============================================================
 
 def detect_extension(url, content_type=None, disposition=None):
-    """Find a filename extension from response headers or URL."""
-
+    """Find a filename extension from headers or URL."""
     if disposition:
         match = re.search(
             r'filename\*?=(?:UTF-8\'\')?"?([^";]+)',
@@ -222,7 +211,6 @@ def detect_extension(url, content_type=None, disposition=None):
 
 def download_direct_file(url, folder):
     """Download a direct file URL. Return None for HTML pages."""
-
     response = safe_stream_request(url)
 
     try:
@@ -303,12 +291,11 @@ def download_direct_file(url, folder):
 
 
 # ============================================================
-# COOKIES
+# COOKIE MANAGEMENT
 # ============================================================
 
 def cookie_environment(host):
     """Return the environment variable associated with a platform."""
-
     host = (host or "").lower()
 
     mappings = [
@@ -334,17 +321,12 @@ def cookie_environment(host):
 
 def create_cookie_file(host, folder):
     """
-    Load cookies securely.
-
-    Instagram priority:
-      1. INSTAGRAM_COOKIES_PATH
-      2. /data/cookies.txt on Railway Volume
-      3. INSTAGRAM_COOKIES_B64
-      4. Local cookies.txt
-
-    Never print cookie contents to logs.
+    Cookie priority for Instagram:
+    1. INSTAGRAM_COOKIES_PATH
+    2. /data/cookies.txt on Railway Volume
+    3. INSTAGRAM_COOKIES_B64
+    4. Local cookies.txt
     """
-
     host = (host or "").lower()
     folder = Path(folder)
 
@@ -389,7 +371,6 @@ def create_cookie_file(host, folder):
 
         return False
 
-    # 1. Explicit cookie file path.
     configured_path = os.getenv(
         "INSTAGRAM_COOKIES_PATH",
         "",
@@ -402,11 +383,8 @@ def create_cookie_file(host, folder):
             log.info("Loaded Instagram cookies from configured path.")
             return candidate.resolve()
 
-        log.warning(
-            "INSTAGRAM_COOKIES_PATH is missing or invalid."
-        )
+        log.warning("INSTAGRAM_COOKIES_PATH is missing or invalid.")
 
-    # 2. Railway Volume mounted at /data.
     if is_instagram:
         volume_cookie = Path("/data/cookies.txt")
 
@@ -414,7 +392,6 @@ def create_cookie_file(host, folder):
             log.info("Loaded Instagram cookies from Railway Volume.")
             return volume_cookie
 
-    # 3. Optional Base64 environment variable.
     variable = cookie_environment(host)
     encoded = os.getenv(variable, "").strip()
 
@@ -464,7 +441,6 @@ def create_cookie_file(host, folder):
                 str(exc)[:200],
             )
 
-    # 4. Local file fallback.
     local_cookie = Path("cookies.txt")
 
     if valid_cookie_file(local_cookie):
@@ -472,9 +448,7 @@ def create_cookie_file(host, folder):
         return local_cookie.resolve()
 
     if is_instagram:
-        log.warning(
-            "No valid Instagram cookies found. Check /data/cookies.txt."
-        )
+        log.warning("No valid Instagram cookies found. Check /data/cookies.txt.")
 
     return None
 
@@ -485,7 +459,6 @@ def create_cookie_file(host, folder):
 
 def ytdlp_download(url, folder):
     """Download media from sites supported by yt-dlp."""
-
     host = (urlparse(url).hostname or "").lower()
 
     existing_files = {
@@ -588,18 +561,11 @@ def ytdlp_download(url, folder):
 
 
 # ============================================================
-# INSTAGRAM GALLERY FALLBACK
+# INSTAGRAM GALLERY-DL FALLBACK
 # ============================================================
 
-
 def instagram_gallery_download(url, folder):
-    """Download accessible Instagram Story or post media with gallery-dl."""
-
-    import subprocess
-    import sys
-    import os
-    from pathlib import Path
-
+    """Download accessible Instagram media using gallery-dl and cookies."""
     output_folder = Path(folder) / "instagram_gallery"
     output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -627,9 +593,9 @@ def instagram_gallery_download(url, folder):
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Instagram download timed out.") from exc
+        raise RuntimeError("Instagram gallery download timed out.") from exc
 
-    extensions = {
+    allowed = {
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
         ".mp4", ".m4v", ".mov",
     }
@@ -637,33 +603,53 @@ def instagram_gallery_download(url, folder):
     files = [
         path for path in output_folder.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in extensions
+        and path.suffix.lower() in allowed
         and path.stat().st_size > 0
     ]
 
     if files:
-        files.sort(key=lambda p: str(p))
+        files.sort(key=lambda item: str(item))
         return files[:MAX_CAROUSEL_FILES], "Instagram media"
 
     details = (result.stderr or result.stdout or "").strip()
+    lower_details = details.lower()
 
-    if (
-        "login" in details.lower()
-        or "cookies" in details.lower()
-        or "authentication" in details.lower()
+    if any(
+        word in lower_details
+        for word in ("login", "cookies", "authentication", "no results")
     ):
         raise RuntimeError(
-            "Instagram rejected the login session. "
-            "Verify /data/cookies.txt contains fresh Netscape-format "
-            "cookies exported from a logged-in browser."
+            "gallery-dl could not access this Story/post. Confirm "
+            "/data/cookies.txt is a fresh Netscape-format cookie export "
+            "and that the logged-in account is allowed to view this Story. "
+            + details[-500:]
         )
 
     raise RuntimeError(
         "gallery-dl could not retrieve media. "
-        + (details[-700:] if details else
-           f"Exit code: {result.returncode}")
+        + (
+            details[-700:]
+            if details
+            else f"Exit code: {result.returncode}"
+        )
     )
 
+
+# ============================================================
+# INSTAGRAM STORY HANDLER
+# ============================================================
+
+def instagram_story_download(url, folder):
+    """Handle Instagram Story URLs separately using yt-dlp."""
+    host = (urlparse(url).hostname or "").lower()
+
+    if not (
+        host == "instagram.com"
+        or host.endswith(".instagram.com")
+    ):
+        raise RuntimeError("Not an Instagram URL.")
+
+    return ytdlp_download(url, folder)
 
 
 # ============================================================
@@ -672,7 +658,6 @@ def instagram_gallery_download(url, folder):
 
 def instagram_instaloader_download(url, folder):
     """Try Instaloader for accessible Instagram posts."""
-
     match = re.search(
         r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
         url,
@@ -680,7 +665,10 @@ def instagram_instaloader_download(url, folder):
     )
 
     if not match:
-        raise RuntimeError("Could not identify the Instagram post ID.")
+        raise RuntimeError(
+            "This is not a supported Instagram post URL. "
+            "Story URLs are handled separately."
+        )
 
     loader = instaloader.Instaloader(
         download_pictures=False,
@@ -772,7 +760,6 @@ def download_media(url, folder):
     gallery_error = None
     instaloader_error = None
 
-    # 1. Try a direct file URL.
     try:
         direct_file = download_direct_file(url, folder)
 
@@ -787,7 +774,38 @@ def download_media(url, folder):
             direct_error[:300],
         )
 
-    # 2. Try yt-dlp.
+    is_instagram = (
+        host == "instagram.com"
+        or host.endswith(".instagram.com")
+    )
+    is_story_url = (
+        is_instagram
+        and "/stories/" in urlparse(url).path.lower()
+    )
+
+    # Story links should not be sent to Instaloader's post parser.
+    if is_story_url:
+        try:
+            return instagram_story_download(url, folder)
+        except Exception as exc:
+            ytdlp_error = str(exc)
+            log.warning("Instagram Story download failed: %s", ytdlp_error[:500])
+
+        try:
+            return instagram_gallery_download(url, folder)
+        except Exception as exc:
+            gallery_error = str(exc)
+            log.warning("Instagram Story gallery fallback failed: %s", gallery_error[:500])
+
+        raise RuntimeError(
+            "Instagram Story download failed.\n"
+            f"yt-dlp: {ytdlp_error or 'No error recorded'}\n"
+            f"gallery-dl: {gallery_error or 'No error recorded'}\n"
+            "Verify that /data/cookies.txt contains fresh cookies from "
+            "an account authorized to view this Story. The Story may also "
+            "be expired, deleted, or otherwise unavailable."
+        )
+
     try:
         return ytdlp_download(url, folder)
 
@@ -799,8 +817,7 @@ def download_media(url, folder):
             ytdlp_error[:500],
         )
 
-    # 3. Instagram-specific fallback methods.
-    if host == "instagram.com" or host.endswith(".instagram.com"):
+    if is_instagram:
         try:
             return instagram_gallery_download(url, folder)
 
@@ -842,7 +859,6 @@ def download_media(url, folder):
 
 async def send_downloaded_file(message, file_path):
     """Send a downloaded file using the appropriate Telegram method."""
-
     path = Path(file_path)
 
     if not path.is_file() or path.stat().st_size <= 0:
@@ -860,7 +876,7 @@ async def send_downloaded_file(message, file_path):
     caption = path.name[:900]
 
     with path.open("rb") as file:
-        if extension in VIDEO_EXTENSIONS and extension == ".mp4":
+        if extension == ".mp4":
             await message.reply_video(
                 video=file,
                 caption=caption,
@@ -907,10 +923,10 @@ async def start_command(
 
     await update.message.reply_text(
         "👋 Welcome to Media Downloader!\n\n"
-        "🔗 Send a supported public media link.\n\n"
+        "🔗 Send a supported media link.\n\n"
         "Supported platforms include:\n"
         "• YouTube videos and Shorts\n"
-        "• Instagram posts, Reels, and supported carousels\n"
+        "• Instagram posts, Reels, Stories, and carousels\n"
         "• Facebook and TikTok\n"
         "• X/Twitter, Reddit, and Pinterest\n"
         "• Other yt-dlp-supported sites\n"
@@ -937,8 +953,8 @@ async def help_command(
         "Important:\n"
         "• Private, deleted, restricted, or login-protected content "
         "may not be available.\n"
-        "• Some platforms change their systems and may temporarily fail.\n"
-        "• Instagram cookies expire and may need to be refreshed.\n"
+        "• Some platforms may temporarily fail.\n"
+        "• Instagram cookies expire and may need refreshing.\n"
         "• Only download content you are authorized to access."
     )
 
@@ -1012,10 +1028,7 @@ async def handle_url(
                     continue
 
                 if path.stat().st_size > MAX_UPLOAD_BYTES:
-                    log.warning(
-                        "Skipping oversized file: %s",
-                        path.name,
-                    )
+                    log.warning("Skipping oversized file: %s", path.name)
                     continue
 
                 deliverable.append(path)
@@ -1051,7 +1064,7 @@ async def handle_url(
         if len(error_text) > 2000:
             error_text = error_text[:2000] + "..."
 
-        message = (
+        error_message = (
             "❌ Download failed.\n\n"
             f"Platform: {host}\n"
             f"Reason: {error_text}\n\n"
@@ -1059,9 +1072,9 @@ async def handle_url(
         )
 
         try:
-            await status.edit_text(message)
+            await status.edit_text(error_message)
         except Exception:
-            await update.message.reply_text(message)
+            await update.message.reply_text(error_message)
 
 
 # ============================================================
