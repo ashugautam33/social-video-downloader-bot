@@ -591,19 +591,25 @@ def ytdlp_download(url, folder):
 # INSTAGRAM GALLERY FALLBACK
 # ============================================================
 
-def instagram_gallery_download(url, folder):
-    """Try gallery-dl for accessible Instagram photos and carousels."""
 
-    output_folder = folder / "instagram_gallery"
+def instagram_gallery_download(url, folder):
+    """Download accessible Instagram Story or post media with gallery-dl."""
+
+    import subprocess
+    import sys
+    import os
+    from pathlib import Path
+
+    output_folder = Path(folder) / "instagram_gallery"
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    cookie_file = create_cookie_file("instagram.com", folder)
+    cookie_file = create_cookie_file("www.instagram.com", folder)
 
     command = [
         sys.executable,
         "-m",
         "gallery_dl",
-        "-D",
+        "--directory",
         str(output_folder),
     ]
 
@@ -621,40 +627,43 @@ def instagram_gallery_download(url, folder):
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            "Instagram gallery download timed out."
-        ) from exc
+        raise RuntimeError("Instagram download timed out.") from exc
 
-    allowed = {
+    extensions = {
         ".jpg", ".jpeg", ".png", ".webp", ".gif",
         ".mp4", ".m4v", ".mov",
     }
 
     files = [
-        path
-        for path in output_folder.rglob("*")
+        path for path in output_folder.rglob("*")
         if path.is_file()
-        and path.suffix.lower() in allowed
+        and path.suffix.lower() in extensions
         and path.stat().st_size > 0
     ]
 
-    if not files:
-        details = (
-            result.stderr
-            or result.stdout
-            or f"gallery-dl exited with status {result.returncode}."
+    if files:
+        files.sort(key=lambda p: str(p))
+        return files[:MAX_CAROUSEL_FILES], "Instagram media"
+
+    details = (result.stderr or result.stdout or "").strip()
+
+    if (
+        "login" in details.lower()
+        or "cookies" in details.lower()
+        or "authentication" in details.lower()
+    ):
+        raise RuntimeError(
+            "Instagram rejected the login session. "
+            "Verify /data/cookies.txt contains fresh Netscape-format "
+            "cookies exported from a logged-in browser."
         )
 
-        if "login" in details.lower() or "cookies" in details.lower():
-            raise RuntimeError(
-                "Instagram requires a valid login session. "
-                "Check /data/cookies.txt and export fresh cookies."
-            )
+    raise RuntimeError(
+        "gallery-dl could not retrieve media. "
+        + (details[-700:] if details else
+           f"Exit code: {result.returncode}")
+    )
 
-        raise RuntimeError(details[-1000:])
-
-    files.sort(key=lambda item: str(item))
-    return files[:MAX_CAROUSEL_FILES], "Instagram media"
 
 
 # ============================================================
