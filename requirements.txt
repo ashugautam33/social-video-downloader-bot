@@ -1,4 +1,0 @@
-python-telegram-bot>=22.5,<23.0
-yt-dlp[default,curl-cffi]
-requests>=2.32.0
-python-dotenv>=1.0.1
