@@ -1,6 +1,6 @@
 
-
 python-telegram-bot>=22.0,<23.0
-yt-dlp
+yt-dlp[default,curl-cffi]
 requests
 instaloader
+gallery-dl
