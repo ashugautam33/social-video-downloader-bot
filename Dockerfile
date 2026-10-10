@@ -6,15 +6,18 @@ ENV PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ffmpeg ca-certificates nodejs \
+       ffmpeg \
+       nodejs \
+       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
 COPY requirements.txt .
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --upgrade yt-dlp \
     && python -m pip install -r requirements.txt
 
 COPY bot.py .
+
 CMD ["python", "-u", "bot.py"]
