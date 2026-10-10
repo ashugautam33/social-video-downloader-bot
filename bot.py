@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -59,7 +60,6 @@ COOKIE_VARIABLES = {
     "REDDIT": "REDDIT_COOKIES_B64",
     "WHATSAPP": "WHATSAPP_COOKIES_B64",
     "TELEGRAM": "TELEGRAM_COOKIES_B64",
-    "MESSENGER": "MESSENGER_COOKIES_B64",
     "SHARECHAT": "SHARECHAT_COOKIES_B64",
     "MOJ": "MOJ_COOKIES_B64",
     "JOSH": "JOSH_COOKIES_B64",
@@ -67,6 +67,7 @@ COOKIE_VARIABLES = {
     "ARATTAI": "ARATTAI_COOKIES_B64",
     "SANDES": "SANDES_COOKIES_B64",
     "KOO": "KOO_COOKIES_B64",
+    "MESSENGER": "MESSENGER_COOKIES_B64",
 }
 
 PLATFORMS = {
@@ -97,13 +98,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-# Avoid HTTP debug logs that might expose signed URLs or credentials.
 for logger_name in (
-    "httpx",
-    "httpcore",
-    "telegram",
-    "telegram.ext",
-    "urllib3",
+    "httpx", "httpcore", "telegram", "telegram.ext", "urllib3"
 ):
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
@@ -111,7 +107,7 @@ logger = logging.getLogger("universal_downloader")
 
 
 # ============================================================
-# PLATFORM AND URL HELPERS
+# URL HELPERS
 # ============================================================
 
 def platform_for_url(url):
@@ -135,8 +131,8 @@ def extract_urls(message):
     text = message.text or message.caption or ""
 
     urls = [
-        value.strip().rstrip(".,!?;:)]}>'\"")
-        for value in URL_PATTERN.findall(text)
+        item.strip().rstrip(".,!?;:)]}>'\"")
+        for item in URL_PATTERN.findall(text)
     ]
 
     entities = message.entities or message.caption_entities or []
@@ -144,9 +140,9 @@ def extract_urls(message):
     for entity in entities:
         if entity.type == "url":
             urls.append(
-                text[
-                    entity.offset:entity.offset + entity.length
-                ].strip().rstrip(".,!?;:)]}>'\"")
+                text[entity.offset:entity.offset + entity.length]
+                .strip()
+                .rstrip(".,!?;:)]}>'\"")
             )
         elif entity.type == "text_link" and entity.url:
             urls.append(entity.url.strip())
@@ -154,8 +150,11 @@ def extract_urls(message):
     return list(dict.fromkeys(url for url in urls if url))
 
 
+# ============================================================
+# URL SAFETY
+# ============================================================
+
 def validate_public_url(url):
-    """Reject malformed URLs and local/private network destinations."""
     try:
         parsed = urlsplit(url)
 
@@ -179,8 +178,8 @@ def validate_public_url(url):
                 type=socket.SOCK_STREAM,
             )
             addresses = [
-                ipaddress.ip_address(item[4][0])
-                for item in results
+                ipaddress.ip_address(result[4][0])
+                for result in results
             ]
 
         if not addresses or any(not address.is_global for address in addresses):
@@ -193,7 +192,7 @@ def validate_public_url(url):
 
 
 # ============================================================
-# OPTIONAL COOKIE SUPPORT
+# COOKIE SUPPORT
 # ============================================================
 
 def get_cookie_file(platform, folder):
@@ -201,27 +200,40 @@ def get_cookie_file(platform, folder):
     encoded = os.getenv(variable, "").strip() if variable else ""
 
     if not encoded:
-        return None
+        return None, None
 
     try:
         encoded = re.sub(r"\s+", "", encoded)
-        raw = base64.b64decode(encoded, validate=True)
-        cookie_text = raw.decode("utf-8-sig")
+        cookie_data = base64.b64decode(encoded, validate=True)
+        cookie_text = cookie_data.decode("utf-8-sig")
 
         if not cookie_text.startswith((
             "# Netscape HTTP Cookie File",
             "# HTTP Cookie File",
         )):
-            logger.warning("Invalid cookie format for %s.", platform)
-            return None
+            return None, f"Invalid Netscape cookie file in {variable}."
 
         cookie_path = Path(folder) / f"{platform.lower()}_cookies.txt"
         cookie_path.write_text(cookie_text, encoding="utf-8")
-        return cookie_path
+
+        return cookie_path, None
 
     except Exception:
-        logger.warning("Could not read optional cookies for %s.", platform)
+        return None, f"Invalid Base64 cookie configuration: {variable}."
+
+
+def optional_cookie(platform, folder):
+    cookie_path, error = get_cookie_file(platform, folder)
+
+    if error:
+        logger.warning(
+            "COOKIE CONFIGURATION ERROR | platform=%s | details=%s",
+            platform or "DIRECT",
+            error,
+        )
         return None
+
+    return cookie_path
 
 
 # ============================================================
@@ -259,7 +271,9 @@ def find_downloaded_file(folder):
         if not path.is_file():
             continue
 
-        if path.name.lower().endswith((".part", ".ytdl", ".json")):
+        if path.name.lower().endswith(
+            (".part", ".ytdl", ".json", ".txt")
+        ):
             continue
 
         if "cookie" in path.name.lower():
@@ -274,7 +288,8 @@ def find_downloaded_file(folder):
     if not candidates:
         return None
 
-    return max(candidates, key=lambda item: item.stat().st_mtime)
+    candidates.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return candidates[0]
 
 
 # ============================================================
@@ -340,13 +355,14 @@ def download_direct_file(url, folder, deadline):
                     "This link opens a webpage, not a direct downloadable file."
                 )
 
-            content_length = response.headers.get("Content-Length", "")
+            content_length = response.headers.get("Content-Length")
 
-            if (
-                content_length.isdigit()
-                and int(content_length) > MAX_FILE_SIZE
-            ):
-                return None, "The file exceeds the 45 MB limit."
+            if content_length:
+                try:
+                    if int(content_length) > MAX_FILE_SIZE:
+                        return None, "The file exceeds the 45 MB limit."
+                except ValueError:
+                    pass
 
             output = Path(folder) / response_filename(response, current_url)
 
@@ -382,9 +398,15 @@ def download_direct_file(url, folder, deadline):
                 extension = mimetypes.guess_extension(content_type)
 
                 if extension:
-                    renamed = output.with_name(output.name + extension)
-                    output.rename(renamed)
-                    output = renamed
+                    new_path = output.with_name(output.name + extension)
+                    output.rename(new_path)
+                    output = new_path
+
+            logger.info(
+                "DIRECT DOWNLOAD SUCCESS | extension=%s | size=%d",
+                output.suffix.lower() or "unknown",
+                total,
+            )
 
             return str(output), None
 
@@ -408,35 +430,55 @@ def classify_ytdlp_error(stderr, stdout, code, url):
 
     if any(term in diagnostic for term in (
         "sign in to confirm",
+        "confirm you're not a bot",
+        "confirm you’re not a bot",
+        "login_required",
         "login required",
         "authentication required",
         "private video",
-        "requested content is not available",
+        "cookies are no longer valid",
     )):
         return (
-            "The platform requires authentication or valid cookies, "
-            "or access is currently unavailable."
+            "The platform requires a valid login session or is challenging "
+            "this server. For YouTube, verify YOUTUBE_COOKIES_B64 contains a "
+            "current Netscape cookies.txt export. Cookies may not fix a Railway IP block."
         )
 
     if any(term in diagnostic for term in (
-        "javascript runtime",
+        "no supported javascript runtime",
+        "javascript runtime could not be found",
         "javascript challenge",
         "challenge solving",
-        "ejs",
+        "yt-dlp-ejs",
     )):
         return (
-            "YouTube JavaScript challenge failed. Check that Node.js and "
-            "yt-dlp-ejs are installed and available on Railway."
+            "YouTube JavaScript challenge support is unavailable. Check the "
+            "Railway Docker build and confirm Deno and yt-dlp[default] are installed."
         )
 
     if "429" in diagnostic or "too many requests" in diagnostic:
-        return "The platform is rate-limiting requests (HTTP 429)."
+        return "The platform is rate-limiting requests (HTTP 429). Try again later."
 
     if "403" in diagnostic or "forbidden" in diagnostic:
         return (
-            "The platform denied the media request (HTTP 403). "
-            "Check the detailed Railway logs; the server IP, selected "
-            "format, or session may be rejected."
+            f"{platform} denied the media request (HTTP 403). This may be caused "
+            "by a rejected format/session or the hosting IP. Check Railway logs; "
+            "code changes cannot bypass an IP or account restriction."
+        )
+
+    if "ffmpeg" in diagnostic and any(term in diagnostic for term in (
+        "not found", "not installed", "not available"
+    )):
+        return "FFmpeg is missing. Confirm the Railway Docker image installs FFmpeg."
+
+    if any(term in diagnostic for term in (
+        "requested format is not available",
+        "no formats found",
+        "no video formats found",
+    )):
+        return (
+            f"No usable media format was returned for this {platform} link. "
+            "The post may be restricted, unavailable, or unsupported."
         )
 
     if any(term in diagnostic for term in (
@@ -449,12 +491,6 @@ def classify_ytdlp_error(stderr, stdout, code, url):
     if "unsupported url" in diagnostic or "no suitable extractor" in diagnostic:
         return f"No supported downloader was found for this {platform} link."
 
-    if "ffmpeg" in diagnostic and (
-        "not found" in diagnostic or "not installed" in diagnostic
-    ):
-        return "FFmpeg is missing from Railway. Install FFmpeg in the build."
-
-    # Log sanitized diagnostic lines without URLs or credentials.
     safe_lines = []
 
     for line in (stderr + "\n" + stdout).splitlines():
@@ -462,10 +498,12 @@ def classify_ytdlp_error(stderr, stdout, code, url):
 
         if not line.strip():
             continue
+
         if any(secret in lowered for secret in (
-            "cookie", "authorization", "bearer ", "set-cookie"
+            "cookie", "authorization", "bearer ", "set-cookie", "password"
         )):
             continue
+
         if "https://" in lowered or "http://" in lowered:
             continue
 
@@ -475,99 +513,119 @@ def classify_ytdlp_error(stderr, stdout, code, url):
         "yt-dlp failure | platform=%s | exit=%s | details=%s",
         platform,
         code,
-        " | ".join(safe_lines[-4:])[:700],
+        " | ".join(safe_lines[-4:])[:700]
+        or "No safe diagnostic lines available",
     )
 
     return (
-        f"Could not download this {platform} link. "
-        "It may be unsupported, restricted, or temporarily unavailable."
+        f"Could not download this {platform} link. Check Railway deployment logs "
+        "for the sanitized yt-dlp diagnostic. The content may be restricted or unavailable."
     )
 
 
 # ============================================================
-# SOCIAL MEDIA DOWNLOADER — YOUTUBE SETTINGS INCLUDED
+# SOCIAL MEDIA DOWNLOADER
 # ============================================================
 
 def download_with_ytdlp(url, folder, deadline):
     platform = platform_for_url(url) or "OTHER"
-    cookie_path = get_cookie_file(platform, folder)
+    cookie_path = optional_cookie(platform, folder)
+    output_template = str(Path(folder) / "%(title).80s-%(id)s.%(ext)s")
 
-    output_template = str(
-        Path(folder) / "%(title).80s-%(id)s.%(ext)s"
-    )
+    def build_command(format_selector):
+        command = [
+            sys.executable,
+            "-m", "yt_dlp",
+            "--no-playlist",
+            "--no-progress",
+            "--socket-timeout", "20",
+            "--retries", "2",
+            "--fragment-retries", "2",
+            "--extractor-retries", "2",
+            "--force-ipv4",
+            "--js-runtimes", "deno",
+            "--max-filesize", "45M",
+            "-f", format_selector,
+            "--merge-output-format", "mkv",
+            "--output", output_template,
+        ]
 
-    command = [
-        sys.executable,
-        "-m", "yt_dlp",
-        "--no-warnings",
-        "--no-playlist",
+        if cookie_path:
+            command.extend(["--cookies", str(cookie_path)])
 
-        "--socket-timeout", "20",
-        "--retries", "3",
-        "--fragment-retries", "3",
-        "--extractor-retries", "3",
+        command.append(url)
+        return command
 
-        # Prefer IPv4 if Railway's IPv6 route is causing problems.
-        "--force-ipv4",
+    # First attempt: best available video and audio streams.
+    formats = ["bestvideo*+bestaudio/best"]
+    result = None
+    stdout = ""
+    stderr = ""
 
-        # YouTube JavaScript challenge support.
-        # Node.js and yt-dlp-ejs must be installed in the environment.
-        "--js-runtimes", "node",
-        "--remote-components", "ejs:npm",
+    for index, format_selector in enumerate(formats):
+        remaining = max(1, int(deadline - time.monotonic()))
 
-        "--max-filesize", "45M",
+        try:
+            result = subprocess.run(
+                build_command(format_selector),
+                capture_output=True,
+                text=True,
+                timeout=min(remaining, DOWNLOAD_TIMEOUT),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None, "The social-media download timed out."
+        except Exception:
+            logger.exception("Could not start yt-dlp.")
+            return None, "The social-media downloader could not start."
 
-        # Prefer a combined HTTPS stream, then fall back to best available.
-        # A combined stream can be lower quality than separate streams.
-        "-f", "best[protocol^=https]/best",
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        downloaded = find_downloaded_file(folder)
 
-        "--merge-output-format", "mkv",
-        "--output", output_template,
-    ]
+        if result.returncode == 0 and downloaded:
+            size = downloaded.stat().st_size
 
-    if cookie_path:
-        command.extend(["--cookies", str(cookie_path)])
+            if size > MAX_FILE_SIZE:
+                downloaded.unlink(missing_ok=True)
+                return None, "The file exceeds the 45 MB limit."
 
-    command.append(url)
+            logger.info(
+                "YTDLP SUCCESS | platform=%s | extension=%s | size=%d",
+                platform,
+                downloaded.suffix.lower() or "unknown",
+                size,
+            )
+            return str(downloaded), None
 
-    remaining = max(1, int(deadline - time.monotonic()))
+        diagnostic = (stderr + "\n" + stdout).lower()
 
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=min(remaining, DOWNLOAD_TIMEOUT),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "The social-media download timed out."
-    except Exception:
-        logger.exception("Could not start yt-dlp.")
-        return None, "The social-media downloader could not start."
+        # A different format will not fix a genuine authentication challenge.
+        if any(term in diagnostic for term in (
+            "sign in to confirm",
+            "confirm you're not a bot",
+            "login_required",
+            "login required",
+            "authentication required",
+            "private video",
+        )):
+            break
 
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    downloaded = find_downloaded_file(folder)
+        # Retry once with a combined HTTPS format for format-specific failures.
+        if index == 0 and any(term in diagnostic for term in (
+            "403",
+            "forbidden",
+            "requested format is not available",
+            "no formats found",
+            "no video formats found",
+        )) and time.monotonic() < deadline - 8:
+            formats.append("best[protocol^=https]/best")
+            continue
 
-    if result.returncode == 0 and downloaded:
-        size = downloaded.stat().st_size
-
-        if size > MAX_FILE_SIZE:
-            downloaded.unlink(missing_ok=True)
-            return None, "The file exceeds the 45 MB limit."
-
-        logger.info(
-            "YTDLP SUCCESS | platform=%s | extension=%s | size=%d",
-            platform,
-            downloaded.suffix.lower() or "unknown",
-            size,
-        )
-
-        return str(downloaded), None
+        break
 
     return None, classify_ytdlp_error(
-        stderr, stdout, result.returncode, url
+        stderr, stdout, getattr(result, "returncode", 1), url
     )
 
 
@@ -577,7 +635,7 @@ def download_with_ytdlp(url, folder, deadline):
 
 def download_with_gallery_dl(url, folder, deadline):
     platform = platform_for_url(url) or "OTHER"
-    cookie_path = get_cookie_file(platform, folder)
+    cookie_path = optional_cookie(platform, folder)
 
     command = [
         sys.executable,
@@ -590,7 +648,6 @@ def download_with_gallery_dl(url, folder, deadline):
         command.extend(["--cookies", str(cookie_path)])
 
     command.append(url)
-
     remaining = max(1, int(deadline - time.monotonic()))
 
     try:
@@ -614,6 +671,12 @@ def download_with_gallery_dl(url, folder, deadline):
             downloaded.unlink(missing_ok=True)
             return None, "The file exceeds the 45 MB limit."
 
+        logger.info(
+            "GALLERY-DL SUCCESS | platform=%s | extension=%s | size=%d",
+            platform,
+            downloaded.suffix.lower() or "unknown",
+            downloaded.stat().st_size,
+        )
         return str(downloaded), None
 
     diagnostic = (
@@ -630,36 +693,41 @@ def download_with_gallery_dl(url, folder, deadline):
 
 
 # ============================================================
-# PLATFORM LIMITATIONS
+# PLATFORM-SPECIFIC MESSAGES
 # ============================================================
 
 def platform_limitation(url):
     platform = platform_for_url(url)
 
-    messages = {
-        "WHATSAPP": (
+    if platform == "WHATSAPP":
+        return (
             "WhatsApp chat, status and invite links are not necessarily "
-            "direct media URLs. Use a direct file URL you can access."
-        ),
-        "MESSENGER": (
+            "direct media URLs. Send a direct file link or an authorized "
+            "download URL."
+        )
+
+    if platform == "MESSENGER":
+        return (
             "Messenger conversation links are not direct media files. "
             "Use a direct media URL you are authorized to access."
-        ),
-        "ARATTAI": (
+        )
+
+    if platform == "ARATTAI":
+        return (
             "Arattai may not have a supported public extractor. "
             "A direct media URL may be required."
-        ),
-        "SANDES": (
-            "Sandes content may require authorized account access "
-            "or a direct media URL."
-        ),
-        "KOO": (
-            "Koo links may be unavailable because the service "
-            "was discontinued."
-        ),
-    }
+        )
 
-    return messages.get(platform)
+    if platform == "SANDES":
+        return (
+            "Sandes content may require authorized account access or a "
+            "direct media URL."
+        )
+
+    if platform == "KOO":
+        return "Koo links may be unavailable because the service was discontinued."
+
+    return None
 
 
 # ============================================================
@@ -674,7 +742,7 @@ def download_media(url, folder, deadline):
 
     platform = platform_for_url(url)
 
-    # Unknown domains: attempt a direct file download.
+    # Unknown domains: try a direct file download.
     if platform is None:
         return download_direct_file(url, folder, deadline)
 
@@ -682,6 +750,10 @@ def download_media(url, folder, deadline):
 
     if path:
         return path, None
+
+    # A gallery extractor does not resolve YouTube authentication/IP blocks.
+    if platform == "YOUTUBE":
+        return None, ytdlp_error
 
     if time.monotonic() >= deadline:
         return None, "The download timed out."
@@ -692,6 +764,14 @@ def download_media(url, folder, deadline):
 
     if path:
         return path, None
+
+    if time.monotonic() < deadline:
+        path, direct_error = download_direct_file(
+            url, folder, deadline
+        )
+
+        if path:
+            return path, None
 
     limitation = platform_limitation(url)
 
@@ -710,11 +790,9 @@ def download_media(url, folder, deadline):
 async def send_media_file(message, filepath):
     path = Path(filepath)
     extension = path.suffix.lower()
-
     mime_type, _ = mimetypes.guess_type(path.name)
     mime_type = (mime_type or "").lower()
 
-    # Photos
     if extension in (".jpg", ".jpeg", ".png"):
         try:
             with path.open("rb") as file_obj:
@@ -728,7 +806,6 @@ async def send_media_file(message, filepath):
         except TelegramError:
             pass
 
-    # Audio
     if mime_type.startswith("audio/") or extension in (
         ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac"
     ):
@@ -744,7 +821,6 @@ async def send_media_file(message, filepath):
         except TelegramError:
             pass
 
-    # Video
     if extension in (
         ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"
     ):
@@ -761,7 +837,6 @@ async def send_media_file(message, filepath):
         except TelegramError:
             pass
 
-    # Documents and other file types
     with path.open("rb") as file_obj:
         await message.reply_document(
             document=file_obj,
@@ -779,10 +854,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
             "👋 Welcome to Universal Media Downloader!\n\n"
-            "Send a supported public social-media link or direct file URL.\n\n"
-            "Platforms attempted: YouTube, Instagram, Facebook, Snapchat, "
-            "X, LinkedIn, Telegram, Pinterest, Reddit, WhatsApp, Messenger, "
-            "ShareChat, Moj, Josh, Chingari, Arattai, Sandes and Koo.\n\n"
+            "Send a supported social-media link or a direct file URL.\n\n"
+            "Platforms attempted: YouTube, YouTube Shorts, Instagram, "
+            "Facebook, Snapchat, X, LinkedIn, Telegram, Pinterest, Reddit, "
+            "WhatsApp, Messenger, ShareChat, Moj, Josh, Chingari, "
+            "Arattai, Sandes and Koo.\n\n"
             "Supports common image, audio, video, document and archive files.\n"
             "Maximum file size: 45 MB.\n"
             "Use /help for details."
@@ -795,11 +871,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📥 HOW TO USE\n\n"
             "1. Send a supported public post link or direct file URL.\n"
             "2. Wait while the bot attempts the download.\n"
-            "3. The bot returns the downloaded file.\n\n"
+            "3. The downloaded file is returned to you.\n\n"
             "Optional platform cookies can be configured in Railway Variables.\n"
-            "YouTube JavaScript challenge support uses Node.js and yt-dlp-ejs.\n\n"
-            "Private posts, expired links, IP restrictions and platform "
-            "verification can prevent downloads.\n\n"
+            "YouTube challenge support uses Deno and yt-dlp[default].\n\n"
+            "Private posts, expired links, login challenges and server IP "
+            "restrictions can prevent downloads.\n\n"
             "Maximum file size: 45 MB. Only download content you are "
             "authorized to access."
         )
@@ -817,7 +893,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     urls = extract_urls(message)
 
-    # Ignore ordinary messages without links.
+    # Stay silent for ordinary messages without URLs.
     if not urls:
         return
 
@@ -833,7 +909,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
 
-    # Process the first URL in the message.
     url = urls[0]
     started = time.monotonic()
     deadline = started + DOWNLOAD_TIMEOUT
@@ -933,6 +1008,26 @@ def main():
     )
 
     logger.info("Universal Media Downloader is starting.")
+    logger.info(
+        "Runtime availability | deno=%s | ffmpeg=%s",
+        bool(shutil.which("deno")),
+        bool(shutil.which("ffmpeg")),
+    )
+
+    try:
+        version = subprocess.run(
+            [sys.executable, "-m", "yt_dlp", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        logger.info(
+            "yt-dlp version=%s",
+            (version.stdout or "unknown").strip()[:40],
+        )
+    except Exception:
+        logger.warning("Could not read yt-dlp version at startup.")
 
     application.run_polling(
         drop_pending_updates=False,
