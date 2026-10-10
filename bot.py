@@ -433,37 +433,51 @@ def ytdlp_download(url, folder):
 def download_media(url, folder):
     host = (urlparse(url).hostname or "").lower()
 
-    # First try direct file streaming. HTML pages fall through to yt-dlp.
+    # Initialize errors so they are available on every path.
+    direct_error = None
+    ytdlp_error = None
+
+    # 1. Try direct file download.
     try:
         direct_file = download_direct_file(url, folder)
-        if direct_file:
+
+        if direct_file is not None:
             return [direct_file], direct_file.name
-    except Exception as direct_error:
-        log.info(
-            "Direct file attempt failed for %s: %s",
+
+    except Exception as exc:
+        direct_error = str(exc)
+        log.warning(
+            "Direct download failed for %s: %s",
             host,
-            str(direct_error)[:300],
+            direct_error[:500],
         )
 
+    # 2. Try yt-dlp.
     try:
         return ytdlp_download(url, folder)
 
-    except Exception as ytdlp_error:
+    except Exception as exc:
+        ytdlp_error = str(exc)
         log.warning(
             "yt-dlp failed for %s: %s",
             host,
-            str(ytdlp_error)[:700],
+            ytdlp_error[:700],
         )
 
-    # Instagram fallback for publicly accessible image/carousel posts.
+    # 3. Instagram fallback for publicly accessible posts.
     if host == "instagram.com" or host.endswith(".instagram.com"):
         try:
             shortcode_match = re.search(
-                r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
+                r"instagram\.com/(?:p|reel|reels|tv)/"
+                r"([A-Za-z0-9_-]+)",
                 url,
+                re.IGNORECASE,
             )
+
             if not shortcode_match:
-                raise RuntimeError("Could not identify Instagram post ID.")
+                raise RuntimeError(
+                    "Could not identify the Instagram post ID."
+                )
 
             loader = instaloader.Instaloader(
                 download_pictures=False,
@@ -489,19 +503,26 @@ def download_media(url, folder):
             files = []
 
             for index, node in enumerate(
-                nodes[:MAX_CAROUSEL_FILES], start=1
+                nodes[:MAX_CAROUSEL_FILES],
+                start=1,
             ):
+                is_video = getattr(node, "is_video", False)
+
                 media_url = (
                     getattr(node, "video_url", None)
-                    if getattr(node, "is_video", False)
+                    if is_video
                     else getattr(node, "display_url", None)
                 )
 
                 if not media_url:
                     continue
 
-                suffix = ".mp4" if node.is_video else ".jpg"
-                destination = folder / f"instagram_{index:03d}{suffix}"
+                suffix = ".mp4" if is_video else ".jpg"
+                destination = folder / (
+                    f"instagram_{index:03d}{suffix}"
+                )
+
+                total = 0
 
                 with requests.get(
                     media_url,
@@ -510,33 +531,57 @@ def download_media(url, folder):
                     headers={"User-Agent": "Mozilla/5.0"},
                 ) as response:
                     response.raise_for_status()
-                    total = 0
 
                     with destination.open("wb") as output:
-                        for chunk in response.iter_content(128 * 1024):
+                        for chunk in response.iter_content(
+                            128 * 1024
+                        ):
                             if not chunk:
                                 continue
+
                             total += len(chunk)
+
                             if total > MAX_DOWNLOAD_BYTES:
-                                raise RuntimeError("Instagram file too large.")
+                                raise RuntimeError(
+                                    "Instagram file exceeds the "
+                                    "configured download size limit."
+                                )
+
                             output.write(chunk)
 
-                if destination.stat().st_size:
+                if (
+                    destination.is_file()
+                    and destination.stat().st_size > 0
+                ):
                     files.append(destination)
 
             if files:
                 return files, post.caption or "Instagram media"
 
-        except Exception as instagram_error:
             raise RuntimeError(
-                "Media extraction failed. "
-                f"yt-dlp: {str(ytdlp_error)[:400]}; "
-                f"Instagram fallback: {str(instagram_error)[:400]}"
-            ) from instagram_error
+                "Instagram returned no accessible media files."
+            )
 
-    raise RuntimeError(str(ytdlp_error))
+        except Exception as exc:
+            instagram_error = str(exc)
 
+            raise RuntimeError(
+                "Media extraction failed.\n"
+                f"Direct download: "
+                f"{direct_error or 'No direct file found'}\n"
+                f"yt-dlp: "
+                f"{ytdlp_error or 'No extractor error recorded'}\n"
+                f"Instagram fallback: {instagram_error}"
+            ) from exc
 
+    # 4. Report the actual failure without an unbound-variable error.
+    raise RuntimeError(
+        "Media download failed.\n"
+        f"Direct download: "
+        f"{direct_error or 'No direct file found'}\n"
+        f"yt-dlp: "
+        f"{ytdlp_error or 'No extractor error recorded'}"
+    )
 # ============================================================
 # TELEGRAM MESSAGES AND UPLOAD
 # ============================================================
