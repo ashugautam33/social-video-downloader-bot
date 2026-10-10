@@ -1006,6 +1006,28 @@ def download_media(url, folder):
             "This code cannot bypass Instagram login or privacy restrictions."
         )
 
+    # Explain Facebook login redirects clearly.
+    combined_errors = " ".join(
+        str(item or "")
+        for item in (direct_error, ytdlp_error, gallery_error)
+    ).lower()
+
+    is_facebook = (
+        host == "facebook.com"
+        or host.endswith(".facebook.com")
+        or host == "fb.watch"
+        or host.endswith(".fb.watch")
+    )
+
+    if is_facebook and "facebook.com/login.php" in combined_errors:
+        raise RuntimeError(
+            "Facebook redirected this link to its login page. "
+            "If this is your content or you are authorized to view it, "
+            "configure a current Netscape-format cookie file at "
+            "/data/facebook_cookies.txt or set FACEBOOK_COOKIES_PATH. "
+            "Private or restricted Stories may still be unavailable."
+        )
+
     # 4. gallery-dl fallback for supported gallery sites.
     gallery_hosts = (
         "pinterest.com",
