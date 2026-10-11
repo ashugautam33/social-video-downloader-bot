@@ -1152,50 +1152,147 @@ async def send_downloaded_file(message, file_path):
 # POST-DOWNLOAD VIDEO CONVERSION
 # ============================================================
 
+
 def convert_video_file(source_path, mode):
-    """Convert a video to H.264/AAC, H.265/AAC, or extract AAC audio."""
+    """Convert video to H.264/AAC, H.265/AAC, or extract AAC audio."""
     source = Path(source_path)
-    if not source.is_file():
-        raise RuntimeError("Original video expired. Please download it again.")
+
+    if not source.is_file() or source.stat().st_size == 0:
+        raise RuntimeError(
+            "Original video is missing or empty. Download it again."
+        )
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(
+            "FFmpeg is missing. Install it in your Railway Dockerfile."
+        )
 
     if mode == "h264":
         output = source.with_name(source.stem + "_H264.mp4")
         codec_args = [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
             "-movflags", "+faststart",
         ]
+
     elif mode == "h265":
         output = source.with_name(source.stem + "_H265.mp4")
         codec_args = [
-            "-c:v", "libx265", "-preset", "veryfast", "-crf", "28",
-            "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
-            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "libx265",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-tag:v", "hvc1",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-x265-params", "log-level=error:pools=2",
         ]
+
     elif mode == "aac":
         output = source.with_name(source.stem + "_AAC.m4a")
-        codec_args = ["-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
-    else:
-        raise RuntimeError("Unknown conversion option.")
+        codec_args = [
+            "-map", "0:a:0",
+            "-vn",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+        ]
 
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), *codec_args, str(output)]
+    else:
+        raise RuntimeError(f"Unknown conversion mode: {mode}")
+
+    output.unlink(missing_ok=True)
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i", str(source),
+        *codec_args,
+        str(output),
+    ]
+
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True,
-            timeout=DOWNLOAD_TIMEOUT, check=False,
+            command,
+            capture_output=True,
+            text=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            check=False,
         )
-    except FileNotFoundError as exc:
-        raise RuntimeError("FFmpeg is missing. Install it in your Railway Dockerfile.") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Conversion timed out. Try a shorter video.") from exc
-
-    if result.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
         output.unlink(missing_ok=True)
-        raise RuntimeError("FFmpeg conversion failed: " + (result.stderr or "No output")[-700:])
+        raise RuntimeError(
+            "FFmpeg timed out. Try a shorter video."
+        ) from exc
+    except OSError as exc:
+        output.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Could not start FFmpeg: {exc}"
+        ) from exc
+
+    stderr = result.stderr or ""
+    stdout = result.stdout or ""
+
+    log.info("FFmpeg exit code: %s", result.returncode)
+    log.info("FFmpeg stderr: %s", stderr[-6000:])
+    if stdout.strip():
+        log.info("FFmpeg stdout: %s", stdout[-2000:])
+
+    if result.returncode != 0:
+        output.unlink(missing_ok=True)
+        details = stderr.strip() or stdout.strip()
+        if not details:
+            details = f"No diagnostic output; exit code {result.returncode}"
+
+        if mode == "aac" and (
+            "matches no streams" in details.lower()
+            or "does not contain any stream" in details.lower()
+        ):
+            raise RuntimeError(
+                "This video does not contain an audio track."
+            )
+
+        raise RuntimeError(
+            f"FFmpeg exited with code {result.returncode}: "
+            f"{details[-1200:]}"
+        )
+
+    if not output.is_file():
+        raise RuntimeError(
+            f"FFmpeg exited with code 0 but created no output. "
+            f"Check Railway logs and disk space. Expected: {output.name}"
+        )
+
+    if output.stat().st_size == 0:
+        output.unlink(missing_ok=True)
+        raise RuntimeError("FFmpeg created an empty output file.")
+
     if output.stat().st_size > MAX_UPLOAD_BYTES:
         output.unlink(missing_ok=True)
-        raise RuntimeError(f"Converted file exceeds the {MAX_UPLOAD_MB} MB upload limit.")
+        raise RuntimeError(
+            f"Converted file exceeds the {MAX_UPLOAD_MB} MB upload limit."
+        )
+
+    log.info(
+        "Conversion successful: %s (%s bytes)",
+        output.name,
+        output.stat().st_size,
+    )
+
     return output
+
 
 
 async def convert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
