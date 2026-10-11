@@ -1508,10 +1508,6 @@ async def handle_url(
             if first_video_token:
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        "🎞 H.264 + AAC (iPhone compatible)",
-                        callback_data=f"convert:{first_video_token}:h264",
-                    )],
-                    [InlineKeyboardButton(
                         "🚀 H.265 + AAC (smaller file)",
                         callback_data=f"convert:{first_video_token}:h265",
                     )],
