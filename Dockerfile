@@ -1,4 +1,3 @@
-
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -17,4 +16,3 @@ COPY bot.py .
 RUN ffmpeg -version
 
 CMD ["python", "-u", "bot.py"]
-```
