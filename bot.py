@@ -1295,54 +1295,98 @@ def convert_video_file(source_path, mode):
 
 
 
-async def convert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def convert_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     query = update.callback_query
+
     if not query:
         return
+
     await query.answer()
 
     try:
         _, token, mode = query.data.split(":", 2)
-        pending = context.application.bot_data.get("pending_conversions", {})
+
+        pending = context.application.bot_data.get(
+            "pending_conversions", {}
+        )
         item = pending.get(token)
+
         if not item:
-            await query.message.reply_text("⌛ This conversion request has expired. Please download the video again.")
+            await query.message.reply_text(
+                "⌛ This conversion request has expired. "
+                "Please download the video again."
+            )
             return
+
         if item["user_id"] != query.from_user.id:
-            await query.answer("This menu belongs to another user.", show_alert=True)
+            await query.message.reply_text(
+                "❌ This conversion menu belongs to another user."
+            )
             return
 
         labels = {
             "h264": "H.264 + AAC (MP4)",
             "h265": "H.265 + AAC (MP4)",
-            "aac": "AAC audio (M4A)",
+            "aac": "AAC Audio (M4A)",
         }
+
         label = labels.get(mode, mode)
-        await query.edit_message_text(f"⚙️ Converting to {label}… Please wait.")
-        converted = await asyncio.to_thread(convert_video_file, item["path"], mode)
+
+        await query.edit_message_text(
+            f"⚙️ Converting to {label}... Please wait."
+        )
+
+        converted = await asyncio.to_thread(
+            convert_video_file,
+            item["path"],
+            mode,
+        )
 
         with converted.open("rb") as media:
             if mode == "aac":
                 await query.message.reply_audio(
-                    audio=media, filename=converted.name,
-                    read_timeout=120, write_timeout=120,
-                    connect_timeout=30, pool_timeout=30,
+                    audio=media,
+                    filename=converted.name,
+                    caption="Hi there, I've created a new file",
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=30,
+                    pool_timeout=30,
                 )
             else:
                 await query.message.reply_video(
-                    video=media, supports_streaming=True,
-                    read_timeout=120, write_timeout=120,
-                    connect_timeout=30, pool_timeout=30,
+                    video=media,
+                    filename=converted.name,
+                    supports_streaming=True,
+                    caption="Hi there, I've created a new file",
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=30,
+                    pool_timeout=30,
                 )
+
         await query.edit_message_text(
-            f"✅ Conversion completed: {label}\n🙏 Thanks for using our Service ⚡"
+            f"✅ Your converted file is ready!\n"
+            f"📁 File: {converted.name}\n"
+            "🙏 Thanks for using our Service ⚡"
         )
+
     except Exception as exc:
         log.exception("Conversion failed")
+
         try:
-            await query.edit_message_text(f"❌ Conversion failed.\n{str(exc)[:900]}")
+            await query.edit_message_text(
+                f"❌ Conversion failed.\n{str(exc)[:900]}"
+            )
         except Exception:
-            await query.message.reply_text(f"❌ Conversion failed.\n{str(exc)[:900]}")
+            await query.message.reply_text(
+                f"❌ Conversion failed.\n{str(exc)[:900]}"
+            )
+
 
 
 # ============================================================
