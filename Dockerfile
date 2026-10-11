@@ -1,3 +1,4 @@
+
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -12,4 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 
+# Verify FFmpeg is installed during the build
+RUN ffmpeg -version
+
 CMD ["python", "-u", "bot.py"]
+```
