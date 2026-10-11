@@ -9,6 +9,8 @@ import logging
 import tempfile
 import subprocess
 import mimetypes
+import uuid
+import shutil
 
 from pathlib import Path
 from urllib.parse import urlparse, unquote, urljoin
@@ -17,12 +19,13 @@ import requests
 import yt_dlp
 import instaloader
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -42,6 +45,15 @@ MAX_CAROUSEL_FILES = int(os.getenv("MAX_CAROUSEL_FILES", "10"))
 
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_MB * 1024 * 1024
+
+# Persistent source files for post-download conversion buttons.
+# Railway: mount a persistent volume at /data.
+CONVERSION_DIR = Path(os.getenv("CONVERSION_DIR", "/data/pending_conversions"))
+try:
+    CONVERSION_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    CONVERSION_DIR = Path(tempfile.gettempdir()) / "media_downloader_conversions"
+    CONVERSION_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -1104,13 +1116,10 @@ async def send_downloaded_file(message, file_path):
         )
 
     extension = path.suffix.lower()
-    caption = path.name[:900]
-
     with path.open("rb") as file:
         if extension == ".mp4":
             await message.reply_video(
                 video=file,
-                caption=caption,
                 supports_streaming=True,
                 read_timeout=120,
                 write_timeout=120,
@@ -1122,7 +1131,6 @@ async def send_downloaded_file(message, file_path):
             await message.reply_audio(
                 audio=file,
                 filename=path.name,
-                caption=caption,
                 read_timeout=120,
                 write_timeout=120,
                 connect_timeout=30,
@@ -1133,12 +1141,111 @@ async def send_downloaded_file(message, file_path):
             await message.reply_document(
                 document=file,
                 filename=path.name,
-                caption=caption,
                 read_timeout=120,
                 write_timeout=120,
                 connect_timeout=30,
                 pool_timeout=30,
             )
+
+
+# ============================================================
+# POST-DOWNLOAD VIDEO CONVERSION
+# ============================================================
+
+def convert_video_file(source_path, mode):
+    """Convert a video to H.264/AAC, H.265/AAC, or extract AAC audio."""
+    source = Path(source_path)
+    if not source.is_file():
+        raise RuntimeError("Original video expired. Please download it again.")
+
+    if mode == "h264":
+        output = source.with_name(source.stem + "_H264.mp4")
+        codec_args = [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+        ]
+    elif mode == "h265":
+        output = source.with_name(source.stem + "_H265.mp4")
+        codec_args = [
+            "-c:v", "libx265", "-preset", "veryfast", "-crf", "28",
+            "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        ]
+    elif mode == "aac":
+        output = source.with_name(source.stem + "_AAC.m4a")
+        codec_args = ["-vn", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    else:
+        raise RuntimeError("Unknown conversion option.")
+
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), *codec_args, str(output)]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True,
+            timeout=DOWNLOAD_TIMEOUT, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("FFmpeg is missing. Install it in your Railway Dockerfile.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Conversion timed out. Try a shorter video.") from exc
+
+    if result.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+        output.unlink(missing_ok=True)
+        raise RuntimeError("FFmpeg conversion failed: " + (result.stderr or "No output")[-700:])
+    if output.stat().st_size > MAX_UPLOAD_BYTES:
+        output.unlink(missing_ok=True)
+        raise RuntimeError(f"Converted file exceeds the {MAX_UPLOAD_MB} MB upload limit.")
+    return output
+
+
+async def convert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    try:
+        _, token, mode = query.data.split(":", 2)
+        pending = context.application.bot_data.get("pending_conversions", {})
+        item = pending.get(token)
+        if not item:
+            await query.message.reply_text("⌛ This conversion request has expired. Please download the video again.")
+            return
+        if item["user_id"] != query.from_user.id:
+            await query.answer("This menu belongs to another user.", show_alert=True)
+            return
+
+        labels = {
+            "h264": "H.264 + AAC (MP4)",
+            "h265": "H.265 + AAC (MP4)",
+            "aac": "AAC audio (M4A)",
+        }
+        label = labels.get(mode, mode)
+        await query.edit_message_text(f"⚙️ Converting to {label}… Please wait.")
+        converted = await asyncio.to_thread(convert_video_file, item["path"], mode)
+
+        with converted.open("rb") as media:
+            if mode == "aac":
+                await query.message.reply_audio(
+                    audio=media, filename=converted.name,
+                    read_timeout=120, write_timeout=120,
+                    connect_timeout=30, pool_timeout=30,
+                )
+            else:
+                await query.message.reply_video(
+                    video=media, supports_streaming=True,
+                    read_timeout=120, write_timeout=120,
+                    connect_timeout=30, pool_timeout=30,
+                )
+        await query.edit_message_text(
+            f"✅ Conversion completed: {label}\n🙏 Thanks for using our Service ⚡"
+        )
+    except Exception as exc:
+        log.exception("Conversion failed")
+        try:
+            await query.edit_message_text(f"❌ Conversion failed.\n{str(exc)[:900]}")
+        except Exception:
+            await query.message.reply_text(f"❌ Conversion failed.\n{str(exc)[:900]}")
 
 
 # ============================================================
@@ -1281,15 +1388,47 @@ async def handle_url(
             )
 
             sent_count = 0
+            first_video_token = None
+            pending = context.application.bot_data.setdefault(
+                "pending_conversions", {}
+            )
 
             for path in deliverable[:MAX_CAROUSEL_FILES]:
                 await send_downloaded_file(update.message, path)
                 sent_count += 1
 
+                if first_video_token is None and path.suffix.lower() in VIDEO_EXTENSIONS:
+                    token = uuid.uuid4().hex[:12]
+                    persistent_source = CONVERSION_DIR / f"{token}_{path.name}"
+                    await asyncio.to_thread(shutil.copy2, path, persistent_source)
+                    pending[token] = {
+                        "path": str(persistent_source),
+                        "user_id": update.effective_user.id,
+                    }
+                    first_video_token = token
+
+            keyboard = None
+            if first_video_token:
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🎞 H.264 + AAC (iPhone compatible)",
+                        callback_data=f"convert:{first_video_token}:h264",
+                    )],
+                    [InlineKeyboardButton(
+                        "🚀 H.265 + AAC (smaller file)",
+                        callback_data=f"convert:{first_video_token}:h265",
+                    )],
+                    [InlineKeyboardButton(
+                        "🎵 Extract AAC audio (M4A)",
+                        callback_data=f"convert:{first_video_token}:aac",
+                    )],
+                ])
+
             await status.edit_text(
                 "✅ Download completed successfully!\n\n"
                 f"📁 Files delivered: {sent_count}\n"
-                "🙏 Thanks for using Media Downloader! ⚡"
+                "🙏 Thanks for using our Service ⚡",
+                reply_markup=keyboard,
             )
 
     except Exception as exc:
@@ -1357,6 +1496,10 @@ def main():
 
     application.add_handler(
         CommandHandler("help", help_command)
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(convert_callback, pattern=r"^convert:")
     )
 
     application.add_handler(
