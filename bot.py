@@ -1082,7 +1082,41 @@ def download_media(url, folder):
         )
 
     raise RuntimeError("\n".join(details))
+def convert_to_iphone_mp4(path):
+    """Convert videos to iPhone-compatible H.264/AAC MP4."""
+    path = Path(path)
 
+    if path.suffix.lower() not in VIDEO_EXTENSIONS:
+        return path
+
+    output = path.with_name(path.stem + "_iphone.mp4")
+
+    command = [
+        "ffmpeg", "-y",
+        "-i", str(path),
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        str(output),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=DOWNLOAD_TIMEOUT,
+        check=False,
+    )
+
+    if result.returncode != 0 or not output.exists():
+        output.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Video conversion failed: " + result.stderr[-500:]
+        )
+
+    return output
 
 # ============================================================
 # TELEGRAM FILE DELIVERY
@@ -1283,8 +1317,13 @@ async def handle_url(
             sent_count = 0
 
             for path in deliverable[:MAX_CAROUSEL_FILES]:
-                await send_downloaded_file(update.message, path)
-                sent_count += 1
+    if path.suffix.lower() in VIDEO_EXTENSIONS:
+        path = await asyncio.to_thread(
+            convert_to_iphone_mp4, path
+        )
+
+    await send_downloaded_file(update.message, path)
+    sent_count += 1
 
             await status.edit_text(
                 "✅ Download completed successfully!\n\n"
