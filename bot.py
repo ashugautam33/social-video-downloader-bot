@@ -37,8 +37,8 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "45"))
-MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "200"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+MAX_DOWNLOAD_MB = int(os.getenv("MAX_DOWNLOAD_MB", "800"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "300"))
 MAX_REDIRECTS = 5
 MAX_CAROUSEL_FILES = int(os.getenv("MAX_CAROUSEL_FILES", "10"))
